@@ -1,0 +1,62 @@
+regime:
+  classes: ["trend", "range", "high_vol"]
+  adx_threshold_trend: 25
+  adx_threshold_range: 20
+  vol_percentile_high: 80
+  use_soft_routing: true
+  routing_temperature: 1.0
+
+ensemble:
+  use_stacking: true
+  use_ranking: true
+  ranking_weight: 0.25
+  probability_weight: 0.75
+  meta_model: "logistic_regression"
+
+validation:
+  train_months: 6
+  validation_months: 1
+  test_months: 1
+  step_months: 1
+  purge_bars: 12
+  embargo_bars: 12
+  n_folds_nested: 3
+
+calibration:
+  method: "isotonic"
+  per_regime: true
+  min_samples_calibration: 500
+
+conformal:
+  alpha_90: 0.10
+  alpha_80: 0.20
+  use_conformal: true
+
+drift:
+  psi_threshold_high: 0.25
+  psi_threshold_medium: 0.10
+  js_threshold: 0.05
+  check_interval_hours: 24
+  enable_drift_detection: true
+
+quality_gate:
+  min_brier_improvement_vs_baseline: 0.005
+  max_ece: 0.05
+  min_top5_precision_vs_event: 1.30
+  min_feature_stability: 0.70
+  min_oos_folds: 3
+  require_all_pass: true
+
+backtest:
+  assumed_taker_fee_percent_per_side: 0.04
+  assumed_slippage_percent_per_side: 0.02
+  max_positions_per_direction: 5
+  prevent_overlapping: true
+  monte_carlo_iterations: 2000
+
+storage:
+  data_directory: "storage"
+  model_directory: "models"
+  report_directory: "reports"
+  logs_directory: "logs"
+  retention_days_scans: 90
