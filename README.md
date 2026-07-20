@@ -13,7 +13,7 @@ endpoints, no ability to place trades.
 | 3 | Triple-barrier labelling, nested walk-forward split (purge + embargo) | ✅ done |
 | 4 | Base models + stacking meta-model, per-regime calibration | ✅ done |
 | 5 | Conformal prediction, drift detection (PSI/JS), stability selection | ✅ done |
-| 6 | Quality gate, cross-sectional ranking, backtest engine (Monte Carlo) | ⏳ planned |
+| 6 | Quality gate, cross-sectional ranking, backtest engine (Monte Carlo) | ✅ done |
 | 7 | Live scanner loop (5m alignment), terminal output, reporting | ⏳ planned |
 
 ## Layout
@@ -45,6 +45,12 @@ src/
     detector.py             # PSI / Jensen-Shannon drift report
   selection/
     stability.py            # L1 stability selection
+  quality/
+    gate.py                 # promotion gate: Brier/ECE/top-k/stability/OOS
+  ranking/
+    cross_sectional.py      # per-timestamp ranking + top-N selection
+  backtest/
+    engine.py               # costed, capacity-capped backtest + Monte Carlo
 tests/
 ```
 
