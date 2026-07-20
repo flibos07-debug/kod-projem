@@ -1,13 +1,32 @@
 # kod-projem
 
-Typed, validated configuration schema for an ML trading-signal model.
+Production-grade ML pipeline for crypto trading signals, built in phases. Read
+only from Binance **public** market-data endpoints — no keys, no order/trade
+endpoints, no ability to place trades.
+
+## Build phases
+
+| Phase | Scope | Status |
+| ----- | ----- | ------ |
+| 1 | Skeleton, config schema/loader, Binance public REST client, HTF resample, logging | ✅ done |
+| 2 | Feature engineering (5m/15m/1h/4h), ATR/ADX, regime classification | ⏳ planned |
+| 3 | Triple-barrier labelling, nested walk-forward split (purge + embargo) | ⏳ planned |
+| 4 | Base models + stacking meta-model, per-regime calibration | ⏳ planned |
+| 5 | Conformal prediction, drift detection (PSI/JS), stability selection | ⏳ planned |
+| 6 | Quality gate, cross-sectional ranking, backtest engine (Monte Carlo) | ⏳ planned |
+| 7 | Live scanner loop (5m alignment), terminal output, reporting | ⏳ planned |
 
 ## Layout
 
 ```
-config/default.yaml     # the default configuration
-src/config_schema.py    # dataclass schema + validation + YAML loader
-tests/test_config_schema.py
+config/default.yaml         # the default configuration
+src/
+  config_schema.py          # dataclass schema + validation + YAML loader
+  logging_utils.py          # centralised logging setup
+  data/
+    binance_client.py       # read-only Binance public REST client
+    resample.py             # base-timeframe -> HTF OHLCV resampling
+tests/
 ```
 
 ## Usage
