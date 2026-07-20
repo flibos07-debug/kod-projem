@@ -12,7 +12,7 @@ endpoints, no ability to place trades.
 | 2 | Feature engineering (5m/15m/1h/4h), ATR/ADX, regime classification | ✅ done |
 | 3 | Triple-barrier labelling, nested walk-forward split (purge + embargo) | ✅ done |
 | 4 | Base models + stacking meta-model, per-regime calibration | ✅ done |
-| 5 | Conformal prediction, drift detection (PSI/JS), stability selection | ⏳ planned |
+| 5 | Conformal prediction, drift detection (PSI/JS), stability selection | ✅ done |
 | 6 | Quality gate, cross-sectional ranking, backtest engine (Monte Carlo) | ⏳ planned |
 | 7 | Live scanner loop (5m alignment), terminal output, reporting | ⏳ planned |
 
@@ -39,6 +39,12 @@ src/
     base_models.py          # diverse base learners + meta-model factory
     stacking.py             # out-of-fold stacking ensemble + rank blend
     calibration.py          # per-regime isotonic/sigmoid calibration
+  conformal/
+    predictor.py            # Mondrian split-conformal prediction sets
+  drift/
+    detector.py             # PSI / Jensen-Shannon drift report
+  selection/
+    stability.py            # L1 stability selection
 tests/
 ```
 
