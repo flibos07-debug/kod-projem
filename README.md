@@ -10,7 +10,7 @@ endpoints, no ability to place trades.
 | ----- | ----- | ------ |
 | 1 | Skeleton, config schema/loader, Binance public REST client, HTF resample, logging | ✅ done |
 | 2 | Feature engineering (5m/15m/1h/4h), ATR/ADX, regime classification | ✅ done |
-| 3 | Triple-barrier labelling, nested walk-forward split (purge + embargo) | ⏳ planned |
+| 3 | Triple-barrier labelling, nested walk-forward split (purge + embargo) | ✅ done |
 | 4 | Base models + stacking meta-model, per-regime calibration | ⏳ planned |
 | 5 | Conformal prediction, drift detection (PSI/JS), stability selection | ⏳ planned |
 | 6 | Quality gate, cross-sectional ranking, backtest engine (Monte Carlo) | ⏳ planned |
@@ -31,6 +31,10 @@ src/
     engineering.py          # multi-timeframe feature matrix (no look-ahead)
   regime/
     classifier.py           # trend/range/high_vol + soft routing weights
+  labeling/
+    triple_barrier.py       # triple-barrier labels (+ t1 for purging)
+  validation/
+    walk_forward.py         # nested, purged, embargoed walk-forward folds
 tests/
 ```
 
