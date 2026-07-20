@@ -14,7 +14,7 @@ endpoints, no ability to place trades.
 | 4 | Base models + stacking meta-model, per-regime calibration | ✅ done |
 | 5 | Conformal prediction, drift detection (PSI/JS), stability selection | ✅ done |
 | 6 | Quality gate, cross-sectional ranking, backtest engine (Monte Carlo) | ✅ done |
-| 7 | Live scanner loop (5m alignment), terminal output, reporting | ⏳ planned |
+| 7 | Live scanner loop (5m alignment), terminal output, reporting | ✅ done |
 
 ## Layout
 
@@ -51,10 +51,38 @@ src/
     cross_sectional.py      # per-timestamp ranking + top-N selection
   backtest/
     engine.py               # costed, capacity-capped backtest + Monte Carlo
+  pipeline/
+    training.py             # end-to-end training orchestrator
+    artifacts.py            # model artifact save/load (joblib)
+  scanner/
+    live_scanner.py         # 5m-aligned scan loop + cross-sectional ranking
+  reporting/
+    report.py               # terminal table, CSV persistence, retention
+  utils/
+    timing.py               # timeframe-boundary scheduling helpers
+  main.py                   # CLI: `train` and `scan`
 tests/
 ```
 
-## Usage
+## Command line
+
+```bash
+# Train per-symbol models from Binance public data (last 180 days)
+python -m src.main train --symbols BTCUSDT ETHUSDT --days 180
+
+# Run a single aligned scan using the trained artifacts
+python -m src.main scan --symbols BTCUSDT ETHUSDT --once
+
+# Or run the continuous 5m-aligned scanner loop
+python -m src.main scan --symbols BTCUSDT ETHUSDT
+```
+
+`train` runs the full pipeline (features → labels → regime → purged
+walk-forward → stacking → per-regime calibration → conformal → quality gate)
+and saves a `ModelArtifact` per symbol under `models/`. Only the market
+data-fetching commands touch the network, and only public read-only endpoints.
+
+## Library usage
 
 ```python
 from src.config_schema import load_default, AppConfig
