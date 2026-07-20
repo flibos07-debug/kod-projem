@@ -64,23 +64,44 @@ src/
 tests/
 ```
 
+## Setup
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt        # or: pip install -e .
+python -m unittest discover -s tests    # run the test suite
+```
+
+## Quick start (offline, no network)
+
+The fastest way to see the whole system work — trains on deterministic
+synthetic data and runs a scan, entirely offline:
+
+```bash
+python -m src.main demo --symbols BTCUSDT ETHUSDT SOLUSDT
+```
+
 ## Command line
 
 ```bash
-# Train per-symbol models from Binance public data (last 180 days)
+# Offline end-to-end (synthetic data source)
+python -m src.main --source synthetic train --symbols BTCUSDT --days 300 --fast
+python -m src.main --source synthetic scan  --symbols BTCUSDT --once
+
+# Live: train per-symbol models from Binance public data (last 180 days)
 python -m src.main train --symbols BTCUSDT ETHUSDT --days 180
 
-# Run a single aligned scan using the trained artifacts
+# Live: single aligned scan / continuous 5m-aligned loop
 python -m src.main scan --symbols BTCUSDT ETHUSDT --once
-
-# Or run the continuous 5m-aligned scanner loop
 python -m src.main scan --symbols BTCUSDT ETHUSDT
 ```
 
 `train` runs the full pipeline (features → labels → regime → purged
 walk-forward → stacking → per-regime calibration → conformal → quality gate)
-and saves a `ModelArtifact` per symbol under `models/`. Only the market
-data-fetching commands touch the network, and only public read-only endpoints.
+and saves a `ModelArtifact` per symbol under `models/`. `--source binance`
+(default) uses live public read-only endpoints; `--source synthetic` needs no
+network. Only the data-fetching path touches the network, and only public
+market-data endpoints — the client cannot place orders.
 
 ## Library usage
 
