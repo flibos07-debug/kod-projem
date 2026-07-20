@@ -9,7 +9,7 @@ endpoints, no ability to place trades.
 | Phase | Scope | Status |
 | ----- | ----- | ------ |
 | 1 | Skeleton, config schema/loader, Binance public REST client, HTF resample, logging | ✅ done |
-| 2 | Feature engineering (5m/15m/1h/4h), ATR/ADX, regime classification | ⏳ planned |
+| 2 | Feature engineering (5m/15m/1h/4h), ATR/ADX, regime classification | ✅ done |
 | 3 | Triple-barrier labelling, nested walk-forward split (purge + embargo) | ⏳ planned |
 | 4 | Base models + stacking meta-model, per-regime calibration | ⏳ planned |
 | 5 | Conformal prediction, drift detection (PSI/JS), stability selection | ⏳ planned |
@@ -26,6 +26,11 @@ src/
   data/
     binance_client.py       # read-only Binance public REST client
     resample.py             # base-timeframe -> HTF OHLCV resampling
+  features/
+    indicators.py           # ATR/ADX/RSI/EMA/Bollinger/vol (causal)
+    engineering.py          # multi-timeframe feature matrix (no look-ahead)
+  regime/
+    classifier.py           # trend/range/high_vol + soft routing weights
 tests/
 ```
 
