@@ -61,6 +61,97 @@ class TrainingResult:
     n_folds: int
 
 
+@dataclass
+class SideTrainResult:
+    """Fitted pieces + evaluation for one trade direction (long or short)."""
+
+    ensemble: object
+    calibrator: object
+    conformal: object
+    metrics: dict[str, float]
+    gate: GateReport
+    n_folds: int
+
+
+def train_side_model(
+    config: AppConfig,
+    X: pd.DataFrame,
+    y: pd.Series,
+    t1: pd.Series,
+    regime: pd.Series,
+    *,
+    fast: bool,
+    feature_stability: float,
+    top_k: int = 5,
+) -> SideTrainResult:
+    """Purged walk-forward training + OOS calibration/conformal + quality gate.
+
+    Shared by the single-side and directional pipelines. ``X`` must already be
+    restricted to the selected features.
+    """
+    cfg = config
+    splitter = WalkForwardSplitter(cfg.validation)
+    folds = splitter.split(X.index, t1)
+
+    oos_raw: list[np.ndarray] = []
+    oos_y: list[np.ndarray] = []
+    oos_reg: list[np.ndarray] = []
+    used_folds = 0
+    for fold in folds:
+        ytr = y.iloc[fold.train]
+        yte = y.iloc[fold.test]
+        if ytr.nunique() < 2 or len(yte) == 0:
+            continue
+        ens = StackingEnsemble(use_stacking=cfg.ensemble.use_stacking, fast=fast).fit(
+            X.iloc[fold.train], ytr, cv=cfg.validation.n_folds_nested
+        )
+        oos_raw.append(ens.predict_proba_positive(X.iloc[fold.test]))
+        oos_y.append(yte.to_numpy())
+        oos_reg.append(regime.iloc[fold.test].to_numpy())
+        used_folds += 1
+
+    if used_folds == 0:
+        raise ValueError("walk-forward produced no usable folds; extend the data span")
+
+    raw_all = np.concatenate(oos_raw)
+    y_all = np.concatenate(oos_y)
+    reg_all = np.concatenate(oos_reg)
+
+    calibrator = PerRegimeCalibrator(
+        method=cfg.calibration.method,
+        per_regime=cfg.calibration.per_regime,
+        min_samples=cfg.calibration.min_samples_calibration,
+    ).fit(raw_all, y_all, reg_all)
+    cal_all = calibrator.transform(raw_all, reg_all)
+    conformal = BinaryConformalPredictor().fit(cal_all, y_all)
+
+    base_rate = float(y_all.mean())
+    metrics = {
+        "brier": brier_score(cal_all, y_all),
+        "brier_baseline": brier_score(np.full_like(cal_all, base_rate), y_all),
+        "ece": expected_calibration_error(cal_all, y_all),
+        "top5_precision": top_k_precision(cal_all, y_all, top_k),
+        "event_base_rate": base_rate,
+        "feature_stability": feature_stability,
+        "n_oos_folds": float(used_folds),
+        "n_oos_samples": float(len(y_all)),
+    }
+    gate = QualityGate(cfg.quality_gate).evaluate(
+        brier=metrics["brier"],
+        brier_baseline=metrics["brier_baseline"],
+        ece=metrics["ece"],
+        top5_precision=metrics["top5_precision"],
+        event_base_rate=base_rate,
+        feature_stability=feature_stability,
+        n_oos_folds=used_folds,
+    )
+
+    final_ens = StackingEnsemble(use_stacking=cfg.ensemble.use_stacking, fast=fast).fit(
+        X, y, cv=cfg.validation.n_folds_nested
+    )
+    return SideTrainResult(final_ens, calibrator, conformal, metrics, gate, used_folds)
+
+
 class TrainingPipeline:
     def __init__(self, config: AppConfig, params: PipelineParams | None = None, *, fast: bool = False) -> None:
         self.config = config
@@ -122,84 +213,23 @@ class TrainingPipeline:
             feature_stability = 1.0
         X = X[selected]
 
-        # -- walk-forward OOS collection -----------------------------------
-        splitter = WalkForwardSplitter(cfg.validation)
-        folds = splitter.split(X.index, meta["t1"])
-
-        oos_raw: list[np.ndarray] = []
-        oos_y: list[np.ndarray] = []
-        oos_reg: list[np.ndarray] = []
-        used_folds = 0
-        for fold in folds:
-            ytr = y.iloc[fold.train]
-            yte = y.iloc[fold.test]
-            if ytr.nunique() < 2 or len(yte) == 0:
-                continue
-            ens = StackingEnsemble(
-                use_stacking=cfg.ensemble.use_stacking, fast=self.fast,
-            ).fit(X.iloc[fold.train], ytr, cv=cfg.validation.n_folds_nested)
-            raw = ens.predict_proba_positive(X.iloc[fold.test])
-            oos_raw.append(raw)
-            oos_y.append(yte.to_numpy())
-            oos_reg.append(meta["regime"].iloc[fold.test].to_numpy())
-            used_folds += 1
-
-        if used_folds == 0:
-            raise ValueError("walk-forward produced no usable folds; extend the data span")
-
-        raw_all = np.concatenate(oos_raw)
-        y_all = np.concatenate(oos_y)
-        reg_all = np.concatenate(oos_reg)
-
-        # -- calibration + conformal on OOS predictions --------------------
-        calibrator = PerRegimeCalibrator(
-            method=cfg.calibration.method,
-            per_regime=cfg.calibration.per_regime,
-            min_samples=cfg.calibration.min_samples_calibration,
-        ).fit(raw_all, y_all, reg_all)
-        cal_all = calibrator.transform(raw_all, reg_all)
-
-        conformal = BinaryConformalPredictor().fit(cal_all, y_all)
-
-        # -- metrics + quality gate ----------------------------------------
-        base_rate = float(y_all.mean())
-        metrics = {
-            "brier": brier_score(cal_all, y_all),
-            "brier_baseline": brier_score(np.full_like(cal_all, base_rate), y_all),
-            "ece": expected_calibration_error(cal_all, y_all),
-            "top5_precision": top_k_precision(cal_all, y_all, self.params.top_k),
-            "event_base_rate": base_rate,
-            "feature_stability": feature_stability,
-            "n_oos_folds": float(used_folds),
-            "n_oos_samples": float(len(y_all)),
-        }
-        gate = QualityGate(cfg.quality_gate).evaluate(
-            brier=metrics["brier"],
-            brier_baseline=metrics["brier_baseline"],
-            ece=metrics["ece"],
-            top5_precision=metrics["top5_precision"],
-            event_base_rate=base_rate,
-            feature_stability=feature_stability,
-            n_oos_folds=used_folds,
+        res = train_side_model(
+            cfg, X, y, meta["t1"], meta["regime"],
+            fast=self.fast, feature_stability=feature_stability, top_k=self.params.top_k,
         )
 
-        # -- final refit on all data ---------------------------------------
-        final_ens = StackingEnsemble(
-            use_stacking=cfg.ensemble.use_stacking, fast=self.fast,
-        ).fit(X, y, cv=cfg.validation.n_folds_nested)
-
         artifact = ModelArtifact(
-            ensemble=final_ens,
-            calibrator=calibrator,
-            conformal=conformal,
+            ensemble=res.ensemble,
+            calibrator=res.calibrator,
+            conformal=res.conformal,
             feature_names=selected,
             feature_params=self.params.feature_params,
             metadata={
                 "symbol": symbol,
                 "train_span": [str(X.index[0]), str(X.index[-1])],
                 "n_samples": int(len(X)),
-                "metrics": metrics,
-                "gate_passed": gate.passed,
+                "metrics": res.metrics,
+                "gate_passed": res.gate.passed,
                 "regime_classes": list(cfg.regime.classes),
                 "base_timeframe": self.params.base_timeframe,
                 "htf_timeframes": list(self.params.htf_timeframes),
@@ -207,5 +237,5 @@ class TrainingPipeline:
                 "alpha_80": cfg.conformal.alpha_80,
             },
         )
-        logger.info("Training complete for %s: gate=%s, folds=%d", symbol or "?", gate.passed, used_folds)
-        return TrainingResult(artifact=artifact, gate=gate, metrics=metrics, n_folds=used_folds)
+        logger.info("Training complete for %s: gate=%s, folds=%d", symbol or "?", res.gate.passed, res.n_folds)
+        return TrainingResult(artifact=artifact, gate=res.gate, metrics=res.metrics, n_folds=res.n_folds)

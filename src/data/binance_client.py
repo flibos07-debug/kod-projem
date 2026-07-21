@@ -106,7 +106,17 @@ def to_millis(value: int | float | str | datetime | pd.Timestamp | None) -> int 
 
 
 class BinanceClient:
-    """Minimal, resilient client for Binance public market data."""
+    """Minimal, resilient client for Binance public market data.
+
+    Endpoint paths are class attributes so a Futures subclass can point the same
+    request/retry machinery at the ``/fapi`` endpoints.
+    """
+
+    PATH_PING = "/api/v3/ping"
+    PATH_TIME = "/api/v3/time"
+    PATH_EXCHANGE_INFO = "/api/v3/exchangeInfo"
+    PATH_TICKER_24H = "/api/v3/ticker/24hr"
+    PATH_KLINES = "/api/v3/klines"
 
     def __init__(
         self,
@@ -204,11 +214,11 @@ class BinanceClient:
 
     # -- connectivity -------------------------------------------------------
     def ping(self) -> bool:
-        self._request("/api/v3/ping")
+        self._request(self.PATH_PING)
         return True
 
     def get_server_time(self) -> pd.Timestamp:
-        payload = self._request("/api/v3/time")
+        payload = self._request(self.PATH_TIME)
         return pd.Timestamp(payload["serverTime"], unit="ms", tz="UTC")
 
     # -- exchange info ------------------------------------------------------
@@ -218,7 +228,7 @@ class BinanceClient:
             # Binance expects a JSON-array string, e.g. ["BTCUSDT","ETHUSDT"].
             joined = ",".join(f'"{s.upper()}"' for s in symbols)
             params["symbols"] = f"[{joined}]"
-        return self._request("/api/v3/exchangeInfo", params)
+        return self._request(self.PATH_EXCHANGE_INFO, params)
 
     def get_symbols(
         self,
@@ -243,7 +253,7 @@ class BinanceClient:
     # -- 24h ticker ---------------------------------------------------------
     def get_ticker_24h(self, symbol: str | None = None) -> pd.DataFrame:
         params = {"symbol": symbol.upper()} if symbol else None
-        payload = self._request("/api/v3/ticker/24hr", params)
+        payload = self._request(self.PATH_TICKER_24H, params)
         rows = [payload] if isinstance(payload, dict) else payload
         df = pd.DataFrame(rows)
         numeric = [
@@ -282,7 +292,7 @@ class BinanceClient:
             "endTime": to_millis(end_time),
             "limit": limit,
         }
-        payload = self._request("/api/v3/klines", params)
+        payload = self._request(self.PATH_KLINES, params)
         return self._klines_to_frame(payload)
 
     def get_klines_range(

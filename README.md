@@ -78,8 +78,27 @@ The fastest way to see the whole system work — trains on deterministic
 synthetic data and runs a scan, entirely offline:
 
 ```bash
+# Spot, long-only confidence signals
 python -m src.main demo --symbols BTCUSDT ETHUSDT SOLUSDT
+
+# Futures, two-sided LONG / SHORT / FLAT signals
+python -m src.main futures-demo --symbols BTCUSDT ETHUSDT SOLUSDT
 ```
+
+## Spot vs Futures, long-only vs long/short
+
+| Mode | Data | Signals | Command |
+| ---- | ---- | ------- | ------- |
+| Spot (default) | `api.binance.com` `/api/v3` | long-only (confident LONG / flat) | `scan` / `demo` |
+| Futures | `fapi.binance.com` `/fapi/v1` | **two-sided LONG / SHORT / FLAT** | `futures-demo` (and `--market futures`) |
+
+The **futures** path trains an independent long model *and* short model per
+symbol (triple-barrier `side=±1`), sharing one selected feature set. At scan
+time each side is calibrated and wrapped in a conformal set; the pair decides
+LONG / SHORT / FLAT, and confident signals are ranked cross-sectionally with a
+per-direction position cap. `BinanceFuturesClient.get_perpetual_symbols()`
+provides universe discovery over USDT perpetuals. Everything is still
+**read-only** — no order endpoints.
 
 ## Command line
 

@@ -19,11 +19,14 @@ from pathlib import Path
 
 from .config_schema import AppConfig
 from .data.binance_client import BinanceClient
+from .data.binance_futures_client import BinanceFuturesClient
 from .data.resample import resample_to_timeframes
 from .data.synthetic import SyntheticClient
 from .logging_utils import setup_logging, get_logger
 from .pipeline.artifacts import load_artifact, save_artifact
+from .pipeline.directional import DirectionalPipeline
 from .pipeline.training import PipelineParams, TrainingPipeline
+from .scanner.futures_scanner import FuturesScanner
 from .scanner.live_scanner import LiveScanner
 
 logger = get_logger(__name__)
@@ -38,11 +41,14 @@ def _artifact_path(config: AppConfig, symbol: str) -> Path:
 
 
 def _make_client(args: argparse.Namespace):
-    """Return a data client for the selected source (live Binance or offline)."""
+    """Return a data client for the selected source/market."""
     source = getattr(args, "source", "binance")
+    market = getattr(args, "market", "spot")
     if source == "synthetic":
         logger.info("Using OFFLINE synthetic data source")
         return SyntheticClient()
+    if market == "futures":
+        return BinanceFuturesClient()
     return BinanceClient()
 
 
@@ -138,6 +144,51 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_futures_demo(args: argparse.Namespace) -> int:
+    """Offline two-sided (long/short) futures scan on synthetic data.
+
+    Trains a long AND a short model per symbol, then runs one futures scan
+    emitting LONG / SHORT / FLAT signals — entirely offline.
+    """
+    config = _load_config(args.config)
+    params = PipelineParams(base_timeframe="1h", htf_timeframes=("4h",))
+    pipeline = DirectionalPipeline(config, params, fast=True)
+
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=args.days)
+    client = SyntheticClient(now=now)
+
+    artifacts = {}
+    logger.info("=== FUTURES DEMO: training long+short on synthetic data (%d-day span) ===", args.days)
+    for symbol in args.symbols:
+        base = client.get_klines_range(symbol, params.base_timeframe, start_time=start, end_time=now)
+        frames = resample_to_timeframes(
+            base, [params.base_timeframe, *params.htf_timeframes],
+            base_timeframe=params.base_timeframe, drop_incomplete=True,
+        )
+        try:
+            result = pipeline.run(frames, symbol=symbol, with_short=True)
+        except ValueError as exc:
+            logger.error("Futures demo training skipped for %s: %s", symbol, exc)
+            continue
+        lg = result.long.gate.passed
+        sg = result.short.gate.passed if result.short else None
+        print(f"[{symbol}] long gate={'PASS' if lg else 'FAIL'}, "
+              f"short gate={'PASS' if sg else ('FAIL' if sg is False else 'n/a')}")
+        save_artifact(result.artifact, Path(config.storage.model_directory) / f"{symbol.upper()}_dir.joblib")
+        artifacts[symbol.upper()] = result.artifact
+
+    if not artifacts:
+        logger.error("Futures demo produced no artifacts")
+        return 1
+
+    logger.info("=== FUTURES DEMO: running a single offline long/short scan ===")
+    scanner = FuturesScanner(config, artifacts, client)
+    results = scanner.scan_once()
+    scanner._emit(results)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ml-signals", description=__doc__)
     parser.add_argument("--config", default="config/default.yaml", help="path to the YAML config")
@@ -145,6 +196,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source", choices=["binance", "synthetic"], default="binance",
         help="data source: live Binance public data or offline synthetic",
+    )
+    parser.add_argument(
+        "--market", choices=["spot", "futures"], default="spot",
+        help="live market to read from (spot or USD‑M futures)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -164,6 +219,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_demo.add_argument("--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     p_demo.add_argument("--days", type=int, default=300, help="synthetic history span in days")
     p_demo.set_defaults(func=cmd_demo)
+
+    p_fdemo = sub.add_parser("futures-demo", help="offline long/short futures scan on synthetic data")
+    p_fdemo.add_argument("--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    p_fdemo.add_argument("--days", type=int, default=300, help="synthetic history span in days")
+    p_fdemo.set_defaults(func=cmd_futures_demo)
     return parser
 
 
