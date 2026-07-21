@@ -45,6 +45,54 @@ def render_table(df: pd.DataFrame, *, columns: list[str] | None = None, float_fm
     return "\n".join([line(columns), sep, *[line(r) for r in rows]])
 
 
+def _fmt_price(x: float) -> str:
+    if x != x:  # NaN
+        return "-"
+    if abs(x) >= 100:
+        return f"{x:,.2f}"
+    if abs(x) >= 1:
+        return f"{x:.4f}"
+    return f"{x:.6f}"
+
+
+def render_signals(signals: dict[str, pd.DataFrame]) -> str:
+    """Render the LONG/SHORT trade-plan tables (entry zone, SL, TP1, TP2)."""
+    out: list[str] = []
+    for side in ("long", "short"):
+        df = signals.get(side)
+        title = f"{side.upper()} SİNYALLERİ"
+        if df is None or df.empty:
+            out.append(f"=== {title} ===\n(uygun sinyal yok)")
+            continue
+        rows = []
+        for _, r in df.iterrows():
+            rows.append({
+                "symbol": r["symbol"],
+                "prob": f"{r['prob']:.3f}",
+                "conf": "evet" if r["confident"] else "-",
+                "giriş": f"{_fmt_price(r['entry_low'])} - {_fmt_price(r['entry_high'])}",
+                "SL": f"{_fmt_price(r['stop_loss'])} ({r['sl_pct']:+.2f}%)",
+                "TP1": f"{_fmt_price(r['tp1'])} ({r['tp1_pct']:+.2f}%)",
+                "TP2": f"{_fmt_price(r['tp2'])} ({r['tp2_pct']:+.2f}%)",
+            })
+        table = render_table(pd.DataFrame(rows))
+        out.append(f"=== {title} (en iyi {len(df)}) ===\n{table}")
+    return "\n\n".join(out)
+
+
+def save_signals(signals: dict[str, pd.DataFrame], report_dir: str | Path, *, timestamp: datetime | None = None) -> Path:
+    """Persist LONG+SHORT signals (with levels) to one CSV."""
+    report_dir = Path(report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    ts = (timestamp or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    frames = [df for df in (signals.get("long"), signals.get("short")) if df is not None and not df.empty]
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    path = report_dir / f"signals_{ts.strftime('%Y%m%dT%H%M%SZ')}.csv"
+    combined.to_csv(path, index=False)
+    logger.info("Saved signals to %s", path)
+    return path
+
+
 def save_scan(df: pd.DataFrame, report_dir: str | Path, *, timestamp: datetime | None = None) -> Path:
     """Write a scan to ``report_dir/scan_<UTC timestamp>.csv`` and return the path."""
     report_dir = Path(report_dir)

@@ -261,6 +261,43 @@ def cmd_futures_train(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_directional_artifacts(config: AppConfig, symbols: list[str]) -> dict:
+    model_dir = Path(config.storage.model_directory)
+    if not symbols:
+        symbols = [p.name[: -len("_dir.joblib")] for p in model_dir.glob("*_dir.joblib")]
+    artifacts = {}
+    for symbol in symbols:
+        path = _directional_artifact_path(config, symbol.upper())
+        if path.exists():
+            artifacts[symbol.upper()] = load_artifact(path)
+        else:
+            logger.warning("No artifact for %s at %s", symbol, path)
+    return artifacts
+
+
+def cmd_futures_signals(args: argparse.Namespace) -> int:
+    """Pro report: top-N LONG and SHORT setups with entry zone, SL, TP1, TP2."""
+    args.market = "futures"
+    config = _load_config(args.config)
+    from .reporting.report import render_signals, save_signals
+
+    artifacts = _load_directional_artifacts(config, [s.upper() for s in args.symbols])
+    if not artifacts:
+        logger.error("No directional artifacts found; run `futures-train` first")
+        return 1
+
+    with _make_client(args) as client:
+        scanner = FuturesScanner(config, artifacts, client)
+        max_move = None if args.max_move <= 0 else args.max_move
+        signals = scanner.scan_signals(top_n=args.top_n, max_move_pct=max_move)
+
+    print(f"\n=== Futures sinyalleri @ {datetime.now(timezone.utc).isoformat()} ===")
+    print(f"(taranan: {len(artifacts)} coin | TP2 hedefi ≤ %{args.max_move} hareket)\n")
+    print(render_signals(signals))
+    save_signals(signals, config.storage.report_directory)
+    return 0
+
+
 def cmd_futures_scan(args: argparse.Namespace) -> int:
     """Live two-sided scan: load directional artifacts and emit LONG/SHORT/FLAT."""
     args.market = "futures"
@@ -352,6 +389,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_fscan.add_argument("--once", action="store_true", help="run a single scan and exit")
     p_fscan.add_argument("--iterations", type=int, default=None, help="bound the loop")
     p_fscan.set_defaults(func=cmd_futures_scan)
+
+    p_fsig = sub.add_parser("futures-signals", help="pro report: top LONG/SHORT setups with entry, SL, TP1, TP2")
+    p_fsig.add_argument("--symbols", nargs="*", default=[], help="symbols (default: all trained)")
+    p_fsig.add_argument("--top-n", type=int, default=5, help="how many per direction")
+    p_fsig.add_argument("--max-move", type=float, default=5.0, help="max TP2 move %% (0 = no cap)")
+    p_fsig.set_defaults(func=cmd_futures_signals)
     return parser
 
 

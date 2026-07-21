@@ -158,6 +158,8 @@ class DirectionalPipeline:
                 "htf_timeframes": list(self.params.htf_timeframes),
                 "alpha_90": cfg.conformal.alpha_90,
                 "alpha_80": cfg.conformal.alpha_80,
+                "tp_mult": self.params.barrier.tp_mult,
+                "sl_mult": self.params.barrier.sl_mult,
                 "long_gate_passed": long_model.gate_passed,
                 "short_gate_passed": bool(short_model.gate_passed) if short_model else None,
                 "long_metrics": long_model.metrics,

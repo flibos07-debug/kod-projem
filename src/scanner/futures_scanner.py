@@ -29,12 +29,23 @@ from ..pipeline.directional import DirectionalArtifact, SideModel
 from ..regime.classifier import RegimeClassifier
 from ..reporting.report import cleanup_old_reports, render_table, save_scan
 from ..utils.timing import INTERVAL_MINUTES, next_boundary, seconds_until
+from .levels import compute_levels
 from .live_scanner import _set_repr
 
 # Feature warm-up budget, expressed in bars of *any* timeframe. The scanner must
 # fetch enough base bars that even the highest timeframe has this many complete
 # bars for its indicators to warm up.
 _WARMUP_BARS = 120
+
+_SIGNAL_COLUMNS = [
+    "symbol", "side", "prob", "confident", "regime", "price",
+    "entry_low", "entry_high", "stop_loss", "tp1", "tp2",
+    "sl_pct", "tp1_pct", "tp2_pct",
+]
+
+
+def _empty_signal_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=_SIGNAL_COLUMNS)
 
 logger = get_logger(__name__)
 
@@ -139,12 +150,18 @@ class FuturesScanner:
         else:
             signal, direction, score = "FLAT", "flat", float(np.nanmax([long_prob, short_prob]))
 
+        atr_col = f"{self.base_timeframe}_atr"
+        atr_val = float(matrix[atr_col].iloc[-1]) if atr_col in matrix.columns else float("nan")
+
         return {
             "symbol": symbol,
             "time": matrix.index[-1],
             "close": float(base_df["close"].iloc[-1]),
+            "atr": atr_val,
             "long_prob": long_prob,
             "short_prob": short_prob,
+            "long_conf": long_set == "{1}",
+            "short_conf": short_set == "{1}",
             "regime": regime_last,
             "long_set90": long_set,
             "short_set90": short_set,
@@ -178,6 +195,58 @@ class FuturesScanner:
         selected_idx = actionable.groupby("direction").head(cap).index
         df.loc[selected_idx, "selected"] = True
         return df
+
+    def scan_signals(self, *, top_n: int = 5, max_move_pct: float | None = 5.0) -> dict[str, pd.DataFrame]:
+        """Return the best ``top_n`` LONG and ``top_n`` SHORT trade plans.
+
+        Each row carries an entry zone, stop and TP1/TP2 with percentages,
+        derived from the current ATR and the model's training barrier. LONGs are
+        ranked by ``long_prob`` and SHORTs by ``short_prob``. ``max_move_pct``
+        keeps only setups whose TP2 move magnitude is within that percentage
+        (e.g. the 0-5% swing the user asked for); pass ``None`` to disable.
+        """
+        raw = []
+        for symbol in self.artifacts:
+            try:
+                base_df = self._fetch_base(symbol)
+                scored = self.score_symbol(symbol, base_df)
+                if scored is not None:
+                    raw.append(scored)
+            except Exception as exc:
+                logger.warning("Scoring failed for %s: %s", symbol, exc)
+
+        if not raw:
+            empty = _empty_signal_frame()
+            return {"long": empty, "short": empty}
+
+        df = pd.DataFrame(raw)
+        return {
+            "long": self._side_signals(df, "long", top_n, max_move_pct),
+            "short": self._side_signals(df, "short", top_n, max_move_pct),
+        }
+
+    def _side_signals(self, df: pd.DataFrame, side: str, top_n: int, max_move_pct: float | None) -> pd.DataFrame:
+        prob_col = f"{side}_prob"
+        conf_col = f"{side}_conf"
+        meta = next(iter(self.artifacts.values())).metadata
+        tp_mult = meta.get("tp_mult", 2.0)
+        sl_mult = meta.get("sl_mult", 1.0)
+
+        rows = []
+        for _, r in df.sort_values(prob_col, ascending=False).iterrows():
+            lv = compute_levels(r["close"], r["atr"], side, tp_mult=tp_mult, sl_mult=sl_mult)
+            if max_move_pct is not None and abs(lv.tp2_pct) > max_move_pct:
+                continue
+            rows.append({
+                "symbol": r["symbol"], "side": side.upper(), "prob": r[prob_col],
+                "confident": bool(r[conf_col]), "regime": r["regime"], "price": r["close"],
+                "entry_low": lv.entry_low, "entry_high": lv.entry_high,
+                "stop_loss": lv.stop_loss, "tp1": lv.tp1, "tp2": lv.tp2,
+                "sl_pct": lv.sl_pct, "tp1_pct": lv.tp1_pct, "tp2_pct": lv.tp2_pct,
+            })
+            if len(rows) >= top_n:
+                break
+        return pd.DataFrame(rows) if rows else _empty_signal_frame()
 
     def run(
         self,
