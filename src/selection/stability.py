@@ -32,8 +32,11 @@ def _l1_logistic(c: float, random_state: int) -> LogisticRegression:
     versions require the ``penalty``/``liblinear`` spelling.
     """
     if _SKLEARN_VER >= (1, 8):
+        # Modest max_iter + a looser tol: for *selection* we only need which
+        # coefficients are non-zero, not a fully converged fit, so we don't burn
+        # thousands of iterations chasing convergence on large data.
         return LogisticRegression(
-            solver="saga", l1_ratio=1.0, C=c, max_iter=2000, random_state=random_state
+            solver="saga", l1_ratio=1.0, C=c, max_iter=300, tol=1e-3, random_state=random_state
         )
     return LogisticRegression(
         penalty="l1", solver="liblinear", C=c, max_iter=500, random_state=random_state
@@ -49,6 +52,7 @@ class StabilitySelector:
         threshold: float = 0.7,
         c_grid: tuple[float, ...] = (0.05, 0.1, 0.25),
         random_state: int = 42,
+        max_samples: int = 15_000,
     ) -> None:
         if not 0 < sample_fraction <= 1:
             raise ValueError("sample_fraction must be in (0, 1]")
@@ -59,6 +63,9 @@ class StabilitySelector:
         self.threshold = threshold
         self.c_grid = c_grid
         self.random_state = random_state
+        # Cap each bootstrap fit so selection stays fast on large (e.g. 5m)
+        # datasets — the L1 solver's cost grows with the subsample size.
+        self.max_samples = max_samples
         self.feature_names_: list[str] = []
         self.selection_frequencies_: pd.Series | None = None
         self.support_: np.ndarray | None = None
@@ -77,6 +84,7 @@ class StabilitySelector:
         counts = np.zeros(p, dtype="float64")
         effective = 0
         sub_n = max(2, int(self.sample_fraction * n))
+        sub_n = min(sub_n, self.max_samples)  # keep each L1 fit affordable
 
         for b in range(self.n_bootstraps):
             idx = rng.choice(n, size=sub_n, replace=False)

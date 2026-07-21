@@ -14,8 +14,19 @@ Run one aligned scan (or loop) using the trained artifacts::
 from __future__ import annotations
 
 import argparse
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Keep the CLI output readable: solver non-convergence during selection is
+# expected and harmless, so don't flood the terminal with it.
+try:  # pragma: no cover - defensive import
+    from sklearn.exceptions import ConvergenceWarning
+
+    warnings.filterwarnings("ignore", category=ConvergenceWarning)
+except Exception:  # pragma: no cover
+    pass
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 from .config_schema import AppConfig
 from .data.binance_client import BinanceClient
@@ -205,12 +216,23 @@ def _discover_top_futures(client, n: int, *, quote_asset: str = "USDT") -> list[
     return top
 
 
+def _htf_for_base(base_timeframe: str) -> tuple[str, ...]:
+    """A sensible higher-timeframe set for a given base timeframe."""
+    return {
+        "5m": ("15m", "1h", "4h"),
+        "15m": ("1h", "4h"),
+        "1h": ("4h",),
+    }.get(base_timeframe, ("4h",))
+
+
 def cmd_futures_train(args: argparse.Namespace) -> int:
     """Train long+short models for a Futures symbol set (or top-N by volume)."""
     args.market = "futures"
     config = _load_config(args.config)
-    params = PipelineParams()
+    tf = getattr(args, "timeframe", "5m")
+    params = PipelineParams(base_timeframe=tf, htf_timeframes=_htf_for_base(tf))
     pipeline = DirectionalPipeline(config, params, fast=args.fast)
+    do_selection = not getattr(args, "no_select", False)
     start = datetime.now(timezone.utc) - timedelta(days=args.days)
 
     with _make_client(args) as client:
@@ -227,7 +249,7 @@ def cmd_futures_train(args: argparse.Namespace) -> int:
                 base_timeframe=params.base_timeframe, drop_incomplete=True,
             )
             try:
-                result = pipeline.run(frames, symbol=symbol)
+                result = pipeline.run(frames, symbol=symbol, do_selection=do_selection)
             except ValueError as exc:
                 logger.error("Training skipped for %s: %s", symbol, exc)
                 continue
@@ -316,7 +338,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ftrain = sub.add_parser("futures-train", help="train long+short models for futures symbols")
     p_ftrain.add_argument("--symbols", nargs="*", default=[], help="explicit symbols (or use --top)")
     p_ftrain.add_argument("--top", type=int, default=None, help="auto-pick top-N USDT perpetuals by 24h volume")
-    p_ftrain.add_argument("--days", type=int, default=180, help="history window in days")
+    p_ftrain.add_argument("--days", type=int, default=365, help="history window in days")
+    p_ftrain.add_argument(
+        "--timeframe", choices=["5m", "15m", "1h"], default="1h",
+        help="base timeframe (1h is fast; 5m is heaviest)",
+    )
+    p_ftrain.add_argument("--no-select", action="store_true", help="skip stability selection (faster)")
     p_ftrain.add_argument("--fast", action="store_true")
     p_ftrain.set_defaults(func=cmd_futures_train)
 
