@@ -125,5 +125,46 @@ class FuturesScannerTests(unittest.TestCase):
         self.assertIn("selected", results.columns)
 
 
+class CLITests(unittest.TestCase):
+    def test_futures_train_parses_top(self):
+        from src.main import build_parser
+
+        args = build_parser().parse_args(["futures-train", "--top", "25", "--fast"])
+        self.assertEqual(args.command, "futures-train")
+        self.assertEqual(args.top, 25)
+        self.assertTrue(args.fast)
+
+    def test_futures_scan_defaults_to_all_trained(self):
+        from src.main import build_parser
+
+        args = build_parser().parse_args(["futures-scan", "--once"])
+        self.assertEqual(args.symbols, [])  # empty -> discover from models dir
+        self.assertTrue(args.once)
+
+    def test_market_flag(self):
+        from src.main import build_parser
+
+        args = build_parser().parse_args(["--market", "futures", "futures-scan"])
+        self.assertEqual(args.market, "futures")
+
+    def test_discover_top_futures_ranks_by_volume(self):
+        from src.main import _discover_top_futures
+
+        class FakeFuturesClient:
+            def get_perpetual_symbols(self, quote_asset="USDT"):
+                return ["BTCUSDT", "ETHUSDT", "DOGEUSDT"]
+
+            def get_ticker_24h(self):
+                return pd.DataFrame(
+                    {
+                        "symbol": ["ETHUSDT", "BTCUSDT", "DOGEUSDT", "XRPUSDT"],
+                        "quoteVolume": [5e9, 9e9, 1e9, 8e9],
+                    }
+                )
+
+        top = _discover_top_futures(FakeFuturesClient(), 2)
+        self.assertEqual(top, ["BTCUSDT", "ETHUSDT"])  # by volume, XRP not perpetual
+
+
 if __name__ == "__main__":
     unittest.main()

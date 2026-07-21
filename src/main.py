@@ -189,6 +189,94 @@ def cmd_futures_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _directional_artifact_path(config: AppConfig, symbol: str) -> Path:
+    return Path(config.storage.model_directory) / f"{symbol.upper()}_dir.joblib"
+
+
+def _discover_top_futures(client, n: int, *, quote_asset: str = "USDT") -> list[str]:
+    """Top-N USDT perpetuals by 24h quote volume (universe discovery + ranking)."""
+    symbols = set(client.get_perpetual_symbols(quote_asset=quote_asset))
+    tickers = client.get_ticker_24h()  # all symbols
+    tickers = tickers[tickers["symbol"].isin(symbols)]
+    if "quoteVolume" in tickers.columns:
+        tickers = tickers.sort_values("quoteVolume", ascending=False)
+    top = tickers["symbol"].head(n).tolist()
+    logger.info("Universe: %d perpetuals, scanning top %d by volume", len(symbols), len(top))
+    return top
+
+
+def cmd_futures_train(args: argparse.Namespace) -> int:
+    """Train long+short models for a Futures symbol set (or top-N by volume)."""
+    args.market = "futures"
+    config = _load_config(args.config)
+    params = PipelineParams()
+    pipeline = DirectionalPipeline(config, params, fast=args.fast)
+    start = datetime.now(timezone.utc) - timedelta(days=args.days)
+
+    with _make_client(args) as client:
+        symbols = args.symbols
+        if args.top and hasattr(client, "get_perpetual_symbols"):
+            symbols = _discover_top_futures(client, args.top)
+        if not symbols:
+            logger.error("No symbols to train (pass --symbols or --top N)")
+            return 1
+        for symbol in symbols:
+            base = client.get_klines_range(symbol, params.base_timeframe, start_time=start)
+            frames = resample_to_timeframes(
+                base, [params.base_timeframe, *params.htf_timeframes],
+                base_timeframe=params.base_timeframe, drop_incomplete=True,
+            )
+            try:
+                result = pipeline.run(frames, symbol=symbol)
+            except ValueError as exc:
+                logger.error("Training skipped for %s: %s", symbol, exc)
+                continue
+            lg = result.long.gate.passed
+            sg = result.short.gate.passed if result.short else None
+            print(f"[{symbol}] long gate={'PASS' if lg else 'FAIL'}, "
+                  f"short gate={'PASS' if sg else ('FAIL' if sg is False else 'n/a')}")
+            save_artifact(result.artifact, _directional_artifact_path(config, symbol))
+    return 0
+
+
+def cmd_futures_scan(args: argparse.Namespace) -> int:
+    """Live two-sided scan: load directional artifacts and emit LONG/SHORT/FLAT."""
+    args.market = "futures"
+    config = _load_config(args.config)
+
+    model_dir = Path(config.storage.model_directory)
+    if args.symbols:
+        symbols = [s.upper() for s in args.symbols]
+    else:
+        symbols = [p.name[: -len("_dir.joblib")] for p in model_dir.glob("*_dir.joblib")]
+    if not symbols:
+        logger.error("No directional artifacts found; run `futures-train` first")
+        return 1
+
+    artifacts = {}
+    for symbol in symbols:
+        path = _directional_artifact_path(config, symbol)
+        if path.exists():
+            artifacts[symbol] = load_artifact(path)
+        else:
+            logger.warning("No artifact for %s at %s", symbol, path)
+    if not artifacts:
+        logger.error("No usable artifacts to scan")
+        return 1
+
+    with _make_client(args) as client:
+        scanner = FuturesScanner(config, artifacts, client)
+        if args.once:
+            results = scanner.scan_once()
+            scanner._emit(results)
+            if not results.empty:
+                from .reporting.report import save_scan
+                save_scan(results, config.storage.report_directory)
+        else:
+            scanner.run(max_iterations=args.iterations)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ml-signals", description=__doc__)
     parser.add_argument("--config", default="config/default.yaml", help="path to the YAML config")
@@ -224,6 +312,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_fdemo.add_argument("--symbols", nargs="+", default=["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     p_fdemo.add_argument("--days", type=int, default=300, help="synthetic history span in days")
     p_fdemo.set_defaults(func=cmd_futures_demo)
+
+    p_ftrain = sub.add_parser("futures-train", help="train long+short models for futures symbols")
+    p_ftrain.add_argument("--symbols", nargs="*", default=[], help="explicit symbols (or use --top)")
+    p_ftrain.add_argument("--top", type=int, default=None, help="auto-pick top-N USDT perpetuals by 24h volume")
+    p_ftrain.add_argument("--days", type=int, default=180, help="history window in days")
+    p_ftrain.add_argument("--fast", action="store_true")
+    p_ftrain.set_defaults(func=cmd_futures_train)
+
+    p_fscan = sub.add_parser("futures-scan", help="live long/short scan of trained futures symbols")
+    p_fscan.add_argument("--symbols", nargs="*", default=[], help="symbols to scan (default: all trained)")
+    p_fscan.add_argument("--once", action="store_true", help="run a single scan and exit")
+    p_fscan.add_argument("--iterations", type=int, default=None, help="bound the loop")
+    p_fscan.set_defaults(func=cmd_futures_scan)
     return parser
 
 

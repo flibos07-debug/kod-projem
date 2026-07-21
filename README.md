@@ -100,6 +100,27 @@ per-direction position cap. `BinanceFuturesClient.get_perpetual_symbols()`
 provides universe discovery over USDT perpetuals. Everything is still
 **read-only** — no order endpoints.
 
+### Live futures workflow
+
+```bash
+# 1) Train long+short models — explicit symbols, or auto-pick the most liquid
+python -m src.main --market futures futures-train --symbols BTCUSDT ETHUSDT --days 180
+python -m src.main --market futures futures-train --top 30 --days 180   # top-30 by 24h volume
+
+# 2) Live scan (single pass, or 5m-aligned loop). No --symbols => scan all trained.
+python -m src.main --market futures futures-scan --once
+python -m src.main --market futures futures-scan            # continuous loop
+```
+
+`futures-scan` prints a ranked LONG / SHORT / FLAT table and writes a
+timestamped CSV to `reports/`. A cell is **FLAT** whenever the conformal set
+abstains — the system stays out rather than forcing a low-confidence trade.
+
+> Note: some sandboxed environments block exchange hosts at the network policy
+> (Binance returns 403 via the proxy). Run the live commands where
+> `fapi.binance.com` is reachable; use `--source synthetic` anywhere to see the
+> identical output format offline.
+
 ## Command line
 
 ```bash
