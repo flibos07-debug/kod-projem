@@ -15,7 +15,7 @@ N shorts are selected per scan.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import numpy as np
@@ -28,8 +28,13 @@ from ..logging_utils import get_logger
 from ..pipeline.directional import DirectionalArtifact, SideModel
 from ..regime.classifier import RegimeClassifier
 from ..reporting.report import cleanup_old_reports, render_table, save_scan
-from ..utils.timing import next_boundary, seconds_until
+from ..utils.timing import INTERVAL_MINUTES, next_boundary, seconds_until
 from .live_scanner import _set_repr
+
+# Feature warm-up budget, expressed in bars of *any* timeframe. The scanner must
+# fetch enough base bars that even the highest timeframe has this many complete
+# bars for its indicators to warm up.
+_WARMUP_BARS = 120
 
 logger = get_logger(__name__)
 
@@ -56,6 +61,31 @@ class FuturesScanner:
         self.base_timeframe = meta.get("base_timeframe", "5m")
         self.htf_timeframes = list(meta.get("htf_timeframes", ["15m", "1h", "4h"]))
         self._regime_clf = RegimeClassifier(config.regime, vol_window=vol_window)
+        # Enough base bars so the highest timeframe also gets _WARMUP_BARS
+        # complete bars (single get_klines caps at 1000, which is too few for a
+        # 5m base with a 4h HTF — hence range fetching below).
+        self.required_bars = self._required_base_bars()
+
+    def _required_base_bars(self) -> int:
+        base_m = INTERVAL_MINUTES.get(self.base_timeframe, 5)
+        need = _WARMUP_BARS
+        for tf in self.htf_timeframes:
+            htf_m = INTERVAL_MINUTES.get(tf, base_m)
+            need = max(need, int(_WARMUP_BARS * htf_m / base_m))
+        return int(min(need + 250, 30_000))
+
+    def _fetch_base(self, symbol: str) -> pd.DataFrame:
+        """Fetch enough base history for multi-timeframe warm-up (paginated)."""
+        base_m = INTERVAL_MINUTES.get(self.base_timeframe, 5)
+        if hasattr(self.client, "get_klines_range"):
+            # Anchor to the client's clock when it exposes one (e.g. the offline
+            # SyntheticClient), else the real UTC clock.
+            end = getattr(self.client, "_now", None) or datetime.now(timezone.utc)
+            start = end - timedelta(minutes=self.required_bars * base_m)
+            return self.client.get_klines_range(
+                symbol, self.base_timeframe, start_time=start, end_time=end
+            )
+        return self.client.get_klines(symbol, self.base_timeframe, limit=self.required_bars)
 
     def _side_score(self, model: SideModel | None, x_last: pd.DataFrame, regime_last, alpha_90) -> tuple[float, str]:
         if model is None:
@@ -68,6 +98,7 @@ class FuturesScanner:
     def score_symbol(self, symbol: str, base_df: pd.DataFrame) -> dict | None:
         artifact = self.artifacts.get(symbol)
         if artifact is None or base_df is None or len(base_df) < 100:
+            logger.warning("%s: too little base history (%s bars)", symbol, 0 if base_df is None else len(base_df))
             return None
 
         frames = resample_to_timeframes(
@@ -79,6 +110,10 @@ class FuturesScanner:
             params=artifact.feature_params, dropna=True,
         )
         if matrix.empty:
+            logger.warning(
+                "%s: empty feature matrix (%d base bars insufficient for %s warm-up); "
+                "need ~%d bars", symbol, len(base_df), self.htf_timeframes, self.required_bars,
+            )
             return None
         missing = [f for f in artifact.feature_names if f not in matrix.columns]
         if missing:
@@ -122,7 +157,7 @@ class FuturesScanner:
         rows = []
         for symbol in self.artifacts:
             try:
-                base_df = self.client.get_klines(symbol, self.base_timeframe, limit=self.history_bars)
+                base_df = self._fetch_base(symbol)
                 scored = self.score_symbol(symbol, base_df)
                 if scored is not None:
                     rows.append(scored)
