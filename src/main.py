@@ -34,6 +34,7 @@ from .data.binance_futures_client import BinanceFuturesClient
 from .data.resample import resample_to_timeframes
 from .data.synthetic import SyntheticClient
 from .logging_utils import setup_logging, get_logger
+from .labeling.triple_barrier import BarrierParams
 from .pipeline.artifacts import load_artifact, save_artifact
 from .pipeline.directional import DirectionalPipeline
 from .pipeline.training import PipelineParams, TrainingPipeline
@@ -230,7 +231,14 @@ def cmd_futures_train(args: argparse.Namespace) -> int:
     args.market = "futures"
     config = _load_config(args.config)
     tf = getattr(args, "timeframe", "5m")
-    params = PipelineParams(base_timeframe=tf, htf_timeframes=_htf_for_base(tf))
+    barrier = BarrierParams(
+        tp_mult=args.tp_mult, sl_mult=args.sl_mult, max_holding=args.max_holding,
+    )
+    params = PipelineParams(base_timeframe=tf, htf_timeframes=_htf_for_base(tf), barrier=barrier)
+    logger.info(
+        "Barrier: TP=%.1f*ATR, SL=%.1f*ATR, max_holding=%d %s bars",
+        args.tp_mult, args.sl_mult, args.max_holding, tf,
+    )
     pipeline = DirectionalPipeline(config, params, fast=args.fast)
     do_selection = not getattr(args, "no_select", False)
     start = datetime.now(timezone.utc) - timedelta(days=args.days)
@@ -381,6 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="base timeframe (1h is fast; 5m is heaviest)",
     )
     p_ftrain.add_argument("--no-select", action="store_true", help="skip stability selection (faster)")
+    p_ftrain.add_argument("--tp-mult", type=float, default=2.0, help="take-profit distance in ATRs (bigger = larger TP)")
+    p_ftrain.add_argument("--sl-mult", type=float, default=1.0, help="stop-loss distance in ATRs")
+    p_ftrain.add_argument("--max-holding", type=int, default=12, help="max bars to reach the target (vertical barrier)")
     p_ftrain.add_argument("--fast", action="store_true")
     p_ftrain.set_defaults(func=cmd_futures_train)
 
