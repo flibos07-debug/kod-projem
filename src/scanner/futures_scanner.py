@@ -31,6 +31,7 @@ from ..reporting.report import cleanup_old_reports, render_table, save_scan
 from ..utils.timing import INTERVAL_MINUTES, next_boundary, seconds_until
 from .levels import compute_levels
 from .live_scanner import _set_repr
+from .suitability import compute_suitability
 
 # Feature warm-up budget, expressed in bars of *any* timeframe. The scanner must
 # fetch enough base bars that even the highest timeframe has this many complete
@@ -38,8 +39,8 @@ from .live_scanner import _set_repr
 _WARMUP_BARS = 120
 
 _SIGNAL_COLUMNS = [
-    "symbol", "side", "prob", "confident", "regime", "price",
-    "quote_volume", "funding",
+    "symbol", "side", "prob", "confident", "verdict", "note", "regime", "price",
+    "quote_volume", "funding", "ls_ratio", "open_interest",
     "entry_low", "entry_high", "stop_loss", "tp1", "tp2",
     "sl_pct", "tp1_pct", "tp2_pct",
 ]
@@ -235,6 +236,8 @@ class FuturesScanner:
         fundamentals = fundamentals or {}
         df["quote_volume"] = df["symbol"].map(lambda s: fundamentals.get(s, {}).get("quote_volume", float("nan")))
         df["funding"] = df["symbol"].map(lambda s: fundamentals.get(s, {}).get("funding", float("nan")))
+        df["ls_ratio"] = df["symbol"].map(lambda s: fundamentals.get(s, {}).get("ls_ratio", float("nan")))
+        df["open_interest"] = df["symbol"].map(lambda s: fundamentals.get(s, {}).get("open_interest", float("nan")))
 
         # Fundamental (tradeability) gate: drop illiquid coins.
         if min_quote_volume > 0:
@@ -268,11 +271,19 @@ class FuturesScanner:
             lv = compute_levels(r["close"], r["atr"], side, tp_mult=tp_mult, sl_mult=sl_mult)
             if max_move_pct is not None and abs(lv.tp2_pct) > max_move_pct:
                 continue
+            funding = r.get("funding", float("nan"))
+            ls_ratio = r.get("ls_ratio", float("nan"))
+            suit = compute_suitability(
+                side, prob=float(r[prob_col]), confident=bool(r[conf_col]),
+                funding_pct=funding, ls_ratio=ls_ratio,
+            )
             rows.append({
                 "symbol": r["symbol"], "side": side.upper(), "prob": r[prob_col],
-                "confident": bool(r[conf_col]), "regime": r["regime"], "price": r["close"],
+                "confident": bool(r[conf_col]), "verdict": suit.verdict, "note": suit.note,
+                "regime": r["regime"], "price": r["close"],
                 "quote_volume": r.get("quote_volume", float("nan")),
-                "funding": r.get("funding", float("nan")),
+                "funding": funding, "ls_ratio": ls_ratio,
+                "open_interest": r.get("open_interest", float("nan")),
                 "entry_low": lv.entry_low, "entry_high": lv.entry_high,
                 "stop_loss": lv.stop_loss, "tp1": lv.tp1, "tp2": lv.tp2,
                 "sl_pct": lv.sl_pct, "tp1_pct": lv.tp1_pct, "tp2_pct": lv.tp2_pct,

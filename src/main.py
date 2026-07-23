@@ -307,11 +307,23 @@ def cmd_futures_signals(args: argparse.Namespace) -> int:
     print(f"(taranan: {len(artifacts)} coin | TP2 ≤ %{args.max_move} | min hacim: {args.min_volume}M$)\n")
     print(render_signals(signals))
     save_signals(signals, config.storage.report_directory)
+
+    if args.html:
+        from .reporting.html_report import save_html
+
+        meta = {"scanned": len(artifacts), "max_move": args.max_move, "min_volume": args.min_volume}
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        html_path = Path(config.storage.report_directory) / f"signals_{ts}.html"
+        save_html(signals, html_path, meta=meta)
+        print(f"\n🌐 HTML rapor: {html_path.resolve()}")
+        if args.open_html:
+            import webbrowser
+            webbrowser.open(html_path.resolve().as_uri())
     return 0
 
 
 def _fetch_fundamentals(client, symbols: list[str]) -> dict:
-    """Best-effort liquidity (24h quote volume) and funding rate per symbol."""
+    """Best-effort futures context per symbol: 24h volume, funding, L/S, OI."""
     fundamentals: dict[str, dict] = {s: {} for s in symbols}
     try:
         tickers = client.get_ticker_24h()
@@ -325,6 +337,16 @@ def _fetch_fundamentals(client, symbols: list[str]) -> dict:
             fr = client.get_funding_rate(s, limit=1)
             if not fr.empty:
                 fundamentals[s]["funding"] = float(fr["fundingRate"].iloc[-1]) * 100.0
+        except Exception:
+            pass
+        try:
+            if hasattr(client, "get_long_short_ratio"):
+                fundamentals[s]["ls_ratio"] = client.get_long_short_ratio(s)
+        except Exception:
+            pass
+        try:
+            if hasattr(client, "get_open_interest"):
+                fundamentals[s]["open_interest"] = client.get_open_interest(s)
         except Exception:
             pass
     return fundamentals
@@ -427,9 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_fsig = sub.add_parser("futures-signals", help="pro report: top LONG/SHORT setups with entry, SL, TP1, TP2")
     p_fsig.add_argument("--symbols", nargs="*", default=[], help="symbols (default: all trained)")
-    p_fsig.add_argument("--top-n", type=int, default=5, help="how many per direction")
+    p_fsig.add_argument("--top-n", type=int, default=10, help="how many per direction")
     p_fsig.add_argument("--max-move", type=float, default=5.0, help="max TP2 move %% (0 = no cap)")
     p_fsig.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions (liquidity gate)")
+    p_fsig.add_argument("--html", action="store_true", help="also write a colored HTML dashboard")
+    p_fsig.add_argument("--open-html", action="store_true", help="open the HTML report in the browser")
     p_fsig.set_defaults(func=cmd_futures_signals)
     return parser
 

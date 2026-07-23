@@ -76,3 +76,24 @@ class BinanceFuturesClient(BinanceClient):
             df["fundingTime"] = pd.to_datetime(df["fundingTime"], unit="ms", utc=True)
             df["fundingRate"] = pd.to_numeric(df["fundingRate"], errors="coerce")
         return df
+
+    def get_open_interest(self, symbol: str) -> float:
+        """Current open interest (number of open contracts) for a symbol."""
+        payload = self._request("/fapi/v1/openInterest", {"symbol": symbol.upper()})
+        try:
+            return float(payload.get("openInterest"))
+        except (TypeError, ValueError):
+            return float("nan")
+
+    def get_long_short_ratio(self, symbol: str, *, period: str = "1h") -> float:
+        """Latest global long/short **account** ratio (>1 = crowd net long)."""
+        payload = self._request(
+            "/futures/data/globalLongShortAccountRatio",
+            {"symbol": symbol.upper(), "period": period, "limit": 1},
+        )
+        if isinstance(payload, list) and payload:
+            try:
+                return float(payload[-1].get("longShortRatio"))
+            except (TypeError, ValueError):
+                return float("nan")
+        return float("nan")

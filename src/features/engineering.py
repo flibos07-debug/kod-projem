@@ -87,10 +87,21 @@ def timeframe_features(
     ema_slow = ema(close, params.ema_slow)
     feats["ema_ratio"] = ema_fast / ema_slow - 1.0
     feats["price_vs_ema_slow"] = close / ema_slow - 1.0
+    # EMA crossover events (fast crossing slow) — a classic trend-shift trigger.
+    ema_gap = ema_fast - ema_slow
+    feats["ema_cross_up"] = _cross_up(ema_gap, 0.0).astype("float64")
+    feats["ema_cross_dn"] = _cross_dn(ema_gap, 0.0).astype("float64")
 
     bb = bollinger(close, params.bb_period)
     feats["bb_width"] = bb["bb_width"]
     feats["bb_pct_b"] = bb["bb_pct_b"]
+    # Bollinger mid-band distance and crossings, plus a wide-band regime flag —
+    # signals are more reliable when price crosses the mid-band with wide bands.
+    feats["bb_mid_dist"] = close / bb["bb_mid"] - 1.0
+    feats["bb_mid_cross_up"] = _cross_up(close, bb["bb_mid"]).astype("float64")
+    feats["bb_mid_cross_dn"] = _cross_dn(close, bb["bb_mid"]).astype("float64")
+    bb_width_med = bb["bb_width"].rolling(params.zscore_window, min_periods=params.bb_period).median()
+    feats["bb_wide"] = (bb["bb_width"] > bb_width_med).astype("float64")
 
     for lag in params.momentum_lags:
         feats[f"mom_{lag}"] = close / close.shift(lag) - 1.0
@@ -99,6 +110,22 @@ def timeframe_features(
         feats["vol_z"] = rolling_zscore(df["volume"], params.zscore_window)
 
     return pd.DataFrame(feats, index=df.index)
+
+
+def _cross_up(a: pd.Series, b) -> pd.Series:
+    """True on the bar where ``a`` crosses from <= ``b`` to > ``b``."""
+    b_series = b if isinstance(b, pd.Series) else pd.Series(b, index=a.index)
+    prev = a.shift(1) <= b_series.shift(1)
+    now = a > b_series
+    return (prev & now).fillna(False)
+
+
+def _cross_dn(a: pd.Series, b) -> pd.Series:
+    """True on the bar where ``a`` crosses from >= ``b`` to < ``b``."""
+    b_series = b if isinstance(b, pd.Series) else pd.Series(b, index=a.index)
+    prev = a.shift(1) >= b_series.shift(1)
+    now = a < b_series
+    return (prev & now).fillna(False)
 
 
 def _timeframe_delta(timeframe: str) -> pd.Timedelta:
