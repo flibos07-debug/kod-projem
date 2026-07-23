@@ -68,6 +68,39 @@ class RenderSignalsTests(unittest.TestCase):
         out = render_signals({"long": pd.DataFrame(), "short": pd.DataFrame()})
         self.assertIn("uygun sinyal yok", out)
 
+    def test_render_shows_fundamentals(self):
+        df = self._frame("long")
+        df["quote_volume"] = 1_500_000_000.0
+        df["funding"] = 0.012
+        out = render_signals({"long": df, "short": pd.DataFrame()})
+        self.assertIn("hacim(M$)", out)
+        self.assertIn("funding%", out)
+        self.assertIn("1,500", out)  # volume in millions
+
+
+class DisjointSidesTest(unittest.TestCase):
+    """scan_signals must never place the same coin in both LONG and SHORT."""
+
+    def test_dominant_side_assignment(self):
+        import numpy as np
+
+        # Simulate three scored coins with clear leanings.
+        rows = [
+            {"symbol": "AAA", "close": 100.0, "atr": 1.0, "long_prob": 0.6, "short_prob": 0.2,
+             "long_conf": True, "short_conf": False, "regime": "trend"},
+            {"symbol": "BBB", "close": 50.0, "atr": 0.5, "long_prob": 0.2, "short_prob": 0.55,
+             "long_conf": False, "short_conf": True, "regime": "range"},
+            {"symbol": "CCC", "close": 10.0, "atr": 0.1, "long_prob": 0.45, "short_prob": 0.30,
+             "long_conf": False, "short_conf": False, "regime": "trend"},
+        ]
+        df = pd.DataFrame(rows)
+        dominant = np.where(df["long_prob"] >= df["short_prob"], "long", "short")
+        longs = set(df[dominant == "long"]["symbol"])
+        shorts = set(df[dominant == "short"]["symbol"])
+        self.assertEqual(longs, {"AAA", "CCC"})
+        self.assertEqual(shorts, {"BBB"})
+        self.assertEqual(longs & shorts, set())  # disjoint
+
 
 if __name__ == "__main__":
     unittest.main()

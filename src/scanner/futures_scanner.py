@@ -39,6 +39,7 @@ _WARMUP_BARS = 120
 
 _SIGNAL_COLUMNS = [
     "symbol", "side", "prob", "confident", "regime", "price",
+    "quote_volume", "funding",
     "entry_low", "entry_high", "stop_loss", "tp1", "tp2",
     "sl_pct", "tp1_pct", "tp2_pct",
 ]
@@ -196,14 +197,25 @@ class FuturesScanner:
         df.loc[selected_idx, "selected"] = True
         return df
 
-    def scan_signals(self, *, top_n: int = 5, max_move_pct: float | None = 5.0) -> dict[str, pd.DataFrame]:
+    def scan_signals(
+        self,
+        *,
+        top_n: int = 5,
+        max_move_pct: float | None = 5.0,
+        fundamentals: dict | None = None,
+        min_quote_volume: float = 0.0,
+    ) -> dict[str, pd.DataFrame]:
         """Return the best ``top_n`` LONG and ``top_n`` SHORT trade plans.
 
-        Each row carries an entry zone, stop and TP1/TP2 with percentages,
-        derived from the current ATR and the model's training barrier. LONGs are
-        ranked by ``long_prob`` and SHORTs by ``short_prob``. ``max_move_pct``
-        keeps only setups whose TP2 move magnitude is within that percentage
-        (e.g. the 0-5% swing the user asked for); pass ``None`` to disable.
+        Each coin is assigned to a **single** side — whichever direction its
+        model leans toward — so the LONG and SHORT lists never contain the same
+        symbol. Each row carries an entry zone, stop and TP1/TP2 with
+        percentages from the current ATR and the model's training barrier.
+
+        ``fundamentals`` (``{symbol: {"quote_volume": .., "funding": ..}}``) adds
+        liquidity/funding context; ``min_quote_volume`` drops illiquid coins
+        (a basic tradeability gate). ``max_move_pct`` keeps only setups whose
+        TP2 move is within that percentage (e.g. the 0-5% swing requested).
         """
         raw = []
         for symbol in self.artifacts:
@@ -220,9 +232,28 @@ class FuturesScanner:
             return {"long": empty, "short": empty}
 
         df = pd.DataFrame(raw)
+        fundamentals = fundamentals or {}
+        df["quote_volume"] = df["symbol"].map(lambda s: fundamentals.get(s, {}).get("quote_volume", float("nan")))
+        df["funding"] = df["symbol"].map(lambda s: fundamentals.get(s, {}).get("funding", float("nan")))
+
+        # Fundamental (tradeability) gate: drop illiquid coins.
+        if min_quote_volume > 0:
+            liquid = df["quote_volume"].fillna(0.0) >= min_quote_volume
+            dropped = (~liquid).sum()
+            if dropped:
+                logger.info("Liquidity filter dropped %d coin(s) below %.0f volume", dropped, min_quote_volume)
+            df = df[liquid]
+        if df.empty:
+            empty = _empty_signal_frame()
+            return {"long": empty, "short": empty}
+
+        # Assign each coin to its dominant side -> disjoint LONG/SHORT lists.
+        dominant = np.where(df["long_prob"] >= df["short_prob"], "long", "short")
+        longs = df[dominant == "long"]
+        shorts = df[dominant == "short"]
         return {
-            "long": self._side_signals(df, "long", top_n, max_move_pct),
-            "short": self._side_signals(df, "short", top_n, max_move_pct),
+            "long": self._side_signals(longs, "long", top_n, max_move_pct),
+            "short": self._side_signals(shorts, "short", top_n, max_move_pct),
         }
 
     def _side_signals(self, df: pd.DataFrame, side: str, top_n: int, max_move_pct: float | None) -> pd.DataFrame:
@@ -240,6 +271,8 @@ class FuturesScanner:
             rows.append({
                 "symbol": r["symbol"], "side": side.upper(), "prob": r[prob_col],
                 "confident": bool(r[conf_col]), "regime": r["regime"], "price": r["close"],
+                "quote_volume": r.get("quote_volume", float("nan")),
+                "funding": r.get("funding", float("nan")),
                 "entry_low": lv.entry_low, "entry_high": lv.entry_high,
                 "stop_loss": lv.stop_loss, "tp1": lv.tp1, "tp2": lv.tp2,
                 "sl_pct": lv.sl_pct, "tp1_pct": lv.tp1_pct, "tp2_pct": lv.tp2_pct,

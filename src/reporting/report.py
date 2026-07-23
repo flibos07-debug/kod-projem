@@ -66,10 +66,14 @@ def render_signals(signals: dict[str, pd.DataFrame]) -> str:
             continue
         rows = []
         for _, r in df.iterrows():
+            vol = r.get("quote_volume", float("nan"))
+            funding = r.get("funding", float("nan"))
             rows.append({
                 "symbol": r["symbol"],
                 "prob": f"{r['prob']:.3f}",
                 "conf": "evet" if r["confident"] else "-",
+                "hacim(M$)": "-" if vol != vol else f"{vol/1e6:,.0f}",
+                "funding%": "-" if funding != funding else f"{funding:+.3f}",
                 "giriş": f"{_fmt_price(r['entry_low'])} - {_fmt_price(r['entry_high'])}",
                 "SL": f"{_fmt_price(r['stop_loss'])} ({r['sl_pct']:+.2f}%)",
                 "TP1": f"{_fmt_price(r['tp1'])} ({r['tp1_pct']:+.2f}%)",

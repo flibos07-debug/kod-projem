@@ -295,15 +295,39 @@ def cmd_futures_signals(args: argparse.Namespace) -> int:
         return 1
 
     with _make_client(args) as client:
+        fundamentals = _fetch_fundamentals(client, list(artifacts))
         scanner = FuturesScanner(config, artifacts, client)
         max_move = None if args.max_move <= 0 else args.max_move
-        signals = scanner.scan_signals(top_n=args.top_n, max_move_pct=max_move)
+        signals = scanner.scan_signals(
+            top_n=args.top_n, max_move_pct=max_move,
+            fundamentals=fundamentals, min_quote_volume=args.min_volume * 1e6,
+        )
 
     print(f"\n=== Futures sinyalleri @ {datetime.now(timezone.utc).isoformat()} ===")
-    print(f"(taranan: {len(artifacts)} coin | TP2 hedefi ≤ %{args.max_move} hareket)\n")
+    print(f"(taranan: {len(artifacts)} coin | TP2 ≤ %{args.max_move} | min hacim: {args.min_volume}M$)\n")
     print(render_signals(signals))
     save_signals(signals, config.storage.report_directory)
     return 0
+
+
+def _fetch_fundamentals(client, symbols: list[str]) -> dict:
+    """Best-effort liquidity (24h quote volume) and funding rate per symbol."""
+    fundamentals: dict[str, dict] = {s: {} for s in symbols}
+    try:
+        tickers = client.get_ticker_24h()
+        vol = dict(zip(tickers["symbol"], tickers.get("quoteVolume", [])))
+        for s in symbols:
+            fundamentals[s]["quote_volume"] = float(vol.get(s, float("nan")))
+    except Exception as exc:
+        logger.debug("24h volume unavailable: %s", exc)
+    for s in symbols:
+        try:
+            fr = client.get_funding_rate(s, limit=1)
+            if not fr.empty:
+                fundamentals[s]["funding"] = float(fr["fundingRate"].iloc[-1]) * 100.0
+        except Exception:
+            pass
+    return fundamentals
 
 
 def cmd_futures_scan(args: argparse.Namespace) -> int:
@@ -405,6 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_fsig.add_argument("--symbols", nargs="*", default=[], help="symbols (default: all trained)")
     p_fsig.add_argument("--top-n", type=int, default=5, help="how many per direction")
     p_fsig.add_argument("--max-move", type=float, default=5.0, help="max TP2 move %% (0 = no cap)")
+    p_fsig.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions (liquidity gate)")
     p_fsig.set_defaults(func=cmd_futures_signals)
     return parser
 
