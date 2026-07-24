@@ -205,16 +205,20 @@ def _directional_artifact_path(config: AppConfig, symbol: str) -> Path:
     return Path(config.storage.model_directory) / f"{symbol.upper()}_dir.joblib"
 
 
-def _discover_top_futures(client, n: int, *, quote_asset: str = "USDT") -> list[str]:
-    """Top-N USDT perpetuals by 24h quote volume (universe discovery + ranking)."""
+def _discover_top_futures(client, n: int, *, offset: int = 0, quote_asset: str = "USDT") -> list[str]:
+    """USDT perpetuals ranked by 24h quote volume, sliced ``[offset:offset+n]``."""
     symbols = set(client.get_perpetual_symbols(quote_asset=quote_asset))
     tickers = client.get_ticker_24h()  # all symbols
     tickers = tickers[tickers["symbol"].isin(symbols)]
     if "quoteVolume" in tickers.columns:
         tickers = tickers.sort_values("quoteVolume", ascending=False)
-    top = tickers["symbol"].head(n).tolist()
-    logger.info("Universe: %d perpetuals, scanning top %d by volume", len(symbols), len(top))
-    return top
+    ranked = tickers["symbol"].tolist()
+    chunk = ranked[offset: offset + n]
+    logger.info(
+        "Universe: %d perpetuals; training rank %d-%d (%d coins)",
+        len(symbols), offset + 1, offset + len(chunk), len(chunk),
+    )
+    return chunk
 
 
 def _htf_for_base(base_timeframe: str) -> tuple[str, ...]:
@@ -246,26 +250,38 @@ def cmd_futures_train(args: argparse.Namespace) -> int:
     with _make_client(args) as client:
         symbols = args.symbols
         if args.top and hasattr(client, "get_perpetual_symbols"):
-            symbols = _discover_top_futures(client, args.top)
+            symbols = _discover_top_futures(client, args.top, offset=getattr(args, "offset", 0))
         if not symbols:
             logger.error("No symbols to train (pass --symbols or --top N)")
             return 1
-        for symbol in symbols:
-            base = client.get_klines_range(symbol, params.base_timeframe, start_time=start)
-            frames = resample_to_timeframes(
-                base, [params.base_timeframe, *params.htf_timeframes],
-                base_timeframe=params.base_timeframe, drop_incomplete=True,
-            )
+        skip_existing = getattr(args, "skip_existing", False)
+        total = len(symbols)
+        trained = 0
+        for i, symbol in enumerate(symbols, 1):
+            path = _directional_artifact_path(config, symbol)
+            if skip_existing and path.exists():
+                logger.info("[%d/%d] %s already trained, skipping", i, total, symbol)
+                continue
             try:
+                base = client.get_klines_range(symbol, params.base_timeframe, start_time=start)
+                frames = resample_to_timeframes(
+                    base, [params.base_timeframe, *params.htf_timeframes],
+                    base_timeframe=params.base_timeframe, drop_incomplete=True,
+                )
                 result = pipeline.run(frames, symbol=symbol, do_selection=do_selection)
-            except ValueError as exc:
-                logger.error("Training skipped for %s: %s", symbol, exc)
+            except (ValueError, KeyError) as exc:
+                logger.error("[%d/%d] Training skipped for %s: %s", i, total, symbol, exc)
+                continue
+            except Exception as exc:  # keep going through a big universe
+                logger.error("[%d/%d] Unexpected error for %s: %s", i, total, symbol, exc)
                 continue
             lg = result.long.gate.passed
             sg = result.short.gate.passed if result.short else None
-            print(f"[{symbol}] long gate={'PASS' if lg else 'FAIL'}, "
-                  f"short gate={'PASS' if sg else ('FAIL' if sg is False else 'n/a')}")
-            save_artifact(result.artifact, _directional_artifact_path(config, symbol))
+            print(f"[{i}/{total}] {symbol}: long={'PASS' if lg else 'FAIL'}, "
+                  f"short={'PASS' if sg else ('FAIL' if sg is False else 'n/a')}")
+            save_artifact(result.artifact, path)
+            trained += 1
+    logger.info("Trained %d/%d symbols", trained, total)
     return 0
 
 
@@ -429,6 +445,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ftrain = sub.add_parser("futures-train", help="train long+short models for futures symbols")
     p_ftrain.add_argument("--symbols", nargs="*", default=[], help="explicit symbols (or use --top)")
     p_ftrain.add_argument("--top", type=int, default=None, help="auto-pick top-N USDT perpetuals by 24h volume")
+    p_ftrain.add_argument("--offset", type=int, default=0, help="skip the first N ranked coins (for training in chunks)")
+    p_ftrain.add_argument("--skip-existing", action="store_true", help="skip coins already trained (resume a big run)")
     p_ftrain.add_argument("--days", type=int, default=365, help="history window in days")
     p_ftrain.add_argument(
         "--timeframe", choices=["5m", "15m", "1h"], default="1h",
