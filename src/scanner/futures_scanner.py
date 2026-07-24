@@ -49,6 +49,10 @@ _SIGNAL_COLUMNS = [
 def _empty_signal_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=_SIGNAL_COLUMNS)
 
+
+# Verdict ordering for the --min-verdict filter.
+_VERDICT_RANK = {"ZAYIF": 0, "DİKKATLİ": 1, "UYGUN": 2}
+
 logger = get_logger(__name__)
 
 
@@ -205,6 +209,7 @@ class FuturesScanner:
         max_move_pct: float | None = 5.0,
         fundamentals: dict | None = None,
         min_quote_volume: float = 0.0,
+        min_verdict: int = 0,
     ) -> dict[str, pd.DataFrame]:
         """Return the best ``top_n`` LONG and ``top_n`` SHORT trade plans.
 
@@ -255,11 +260,11 @@ class FuturesScanner:
         longs = df[dominant == "long"]
         shorts = df[dominant == "short"]
         return {
-            "long": self._side_signals(longs, "long", top_n, max_move_pct),
-            "short": self._side_signals(shorts, "short", top_n, max_move_pct),
+            "long": self._side_signals(longs, "long", top_n, max_move_pct, min_verdict),
+            "short": self._side_signals(shorts, "short", top_n, max_move_pct, min_verdict),
         }
 
-    def _side_signals(self, df: pd.DataFrame, side: str, top_n: int, max_move_pct: float | None) -> pd.DataFrame:
+    def _side_signals(self, df: pd.DataFrame, side: str, top_n: int, max_move_pct: float | None, min_verdict: int = 0) -> pd.DataFrame:
         prob_col = f"{side}_prob"
         conf_col = f"{side}_conf"
         meta = next(iter(self.artifacts.values())).metadata
@@ -277,6 +282,8 @@ class FuturesScanner:
                 side, prob=float(r[prob_col]), confident=bool(r[conf_col]),
                 funding_pct=funding, ls_ratio=ls_ratio,
             )
+            if _VERDICT_RANK.get(suit.verdict, 0) < min_verdict:
+                continue
             rows.append({
                 "symbol": r["symbol"], "side": side.upper(), "prob": r[prob_col],
                 "confident": bool(r[conf_col]), "verdict": suit.verdict, "note": suit.note,

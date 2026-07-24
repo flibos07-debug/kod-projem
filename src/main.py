@@ -314,9 +314,11 @@ def cmd_futures_signals(args: argparse.Namespace) -> int:
         fundamentals = _fetch_fundamentals(client, list(artifacts))
         scanner = FuturesScanner(config, artifacts, client)
         max_move = None if args.max_move <= 0 else args.max_move
+        verdict_rank = {"all": 0, "dikkatli": 1, "uygun": 2}[args.min_verdict]
         signals = scanner.scan_signals(
             top_n=args.top_n, max_move_pct=max_move,
             fundamentals=fundamentals, min_quote_volume=args.min_volume * 1e6,
+            min_verdict=verdict_rank,
         )
 
     print(f"\n=== Futures sinyalleri @ {datetime.now(timezone.utc).isoformat()} ===")
@@ -470,6 +472,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_fsig.add_argument("--top-n", type=int, default=10, help="how many per direction")
     p_fsig.add_argument("--max-move", type=float, default=5.0, help="max TP2 move %% (0 = no cap)")
     p_fsig.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions (liquidity gate)")
+    p_fsig.add_argument("--min-verdict", choices=["all", "dikkatli", "uygun"], default="all",
+                        help="only show setups at/above this verdict (hide ZAYIF etc.)")
     p_fsig.add_argument("--html", action="store_true", help="also write a colored HTML dashboard")
     p_fsig.add_argument("--open-html", action="store_true", help="open the HTML report in the browser")
     p_fsig.set_defaults(func=cmd_futures_signals)
