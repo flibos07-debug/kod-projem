@@ -53,6 +53,23 @@ def _empty_signal_frame() -> pd.DataFrame:
 # Verdict ordering for the --min-verdict filter.
 _VERDICT_RANK = {"ZAYIF": 0, "DİKKATLİ": 1, "UYGUN": 2}
 
+
+def _direction_aligned(row: pd.Series, side: str) -> bool:
+    """Reject 'falling knife' LONGs (and 'runaway' SHORTs).
+
+    A LONG is only confirmed when structure has turned up — price at/above the
+    Bollinger mid-band OR the fast EMA at/above the slow EMA. SHORT is the
+    mirror. When neither indicator is available, don't block (return True).
+    """
+    ema_r = row.get("ema_ratio", float("nan"))
+    mid = row.get("bb_mid_dist", float("nan"))
+    checks = []
+    if mid == mid:  # not NaN
+        checks.append(mid >= 0 if side == "long" else mid <= 0)
+    if ema_r == ema_r:
+        checks.append(ema_r >= 0 if side == "long" else ema_r <= 0)
+    return any(checks) if checks else True
+
 logger = get_logger(__name__)
 
 
@@ -156,14 +173,21 @@ class FuturesScanner:
         else:
             signal, direction, score = "FLAT", "flat", float(np.nanmax([long_prob, short_prob]))
 
-        atr_col = f"{self.base_timeframe}_atr"
-        atr_val = float(matrix[atr_col].iloc[-1]) if atr_col in matrix.columns else float("nan")
+        b = self.base_timeframe
+
+        def _last(name: str, default=float("nan")):
+            col = f"{b}_{name}"
+            return float(matrix[col].iloc[-1]) if col in matrix.columns else default
+
+        def _recent(name: str, n: int = 3) -> bool:
+            col = f"{b}_{name}"
+            return bool(matrix[col].iloc[-n:].max() > 0) if col in matrix.columns else False
 
         return {
             "symbol": symbol,
             "time": matrix.index[-1],
             "close": float(base_df["close"].iloc[-1]),
-            "atr": atr_val,
+            "atr": _last("atr"),
             "long_prob": long_prob,
             "short_prob": short_prob,
             "long_conf": long_set == "{1}",
@@ -174,6 +198,15 @@ class FuturesScanner:
             "signal": signal,
             "direction": direction,
             "score": score,
+            # Trend-confirmation context (from the base timeframe).
+            "ema_ratio": _last("ema_ratio"),
+            "bb_mid_dist": _last("bb_mid_dist"),
+            "bb_pct_b": _last("bb_pct_b"),
+            "bb_wide": _last("bb_wide", 0.0),
+            "bb_mid_cross_up": _recent("bb_mid_cross_up"),
+            "bb_mid_cross_dn": _recent("bb_mid_cross_dn"),
+            "ema_cross_up": _recent("ema_cross_up"),
+            "ema_cross_dn": _recent("ema_cross_dn"),
         }
 
     def scan_once(self) -> pd.DataFrame:
@@ -210,6 +243,7 @@ class FuturesScanner:
         fundamentals: dict | None = None,
         min_quote_volume: float = 0.0,
         min_verdict: int = 0,
+        confirm_trend: bool = True,
     ) -> dict[str, pd.DataFrame]:
         """Return the best ``top_n`` LONG and ``top_n`` SHORT trade plans.
 
@@ -260,11 +294,12 @@ class FuturesScanner:
         longs = df[dominant == "long"]
         shorts = df[dominant == "short"]
         return {
-            "long": self._side_signals(longs, "long", top_n, max_move_pct, min_verdict),
-            "short": self._side_signals(shorts, "short", top_n, max_move_pct, min_verdict),
+            "long": self._side_signals(longs, "long", top_n, max_move_pct, min_verdict, confirm_trend),
+            "short": self._side_signals(shorts, "short", top_n, max_move_pct, min_verdict, confirm_trend),
         }
 
-    def _side_signals(self, df: pd.DataFrame, side: str, top_n: int, max_move_pct: float | None, min_verdict: int = 0) -> pd.DataFrame:
+    def _side_signals(self, df: pd.DataFrame, side: str, top_n: int, max_move_pct: float | None,
+                      min_verdict: int = 0, confirm_trend: bool = True) -> pd.DataFrame:
         prob_col = f"{side}_prob"
         conf_col = f"{side}_conf"
         meta = next(iter(self.artifacts.values())).metadata
@@ -273,14 +308,20 @@ class FuturesScanner:
 
         rows = []
         for _, r in df.sort_values(prob_col, ascending=False).iterrows():
+            # Trend confirmation: skip counter-structure setups (falling knives).
+            if confirm_trend and not _direction_aligned(r, side):
+                continue
             lv = compute_levels(r["close"], r["atr"], side, tp_mult=tp_mult, sl_mult=sl_mult)
             if max_move_pct is not None and abs(lv.tp2_pct) > max_move_pct:
                 continue
             funding = r.get("funding", float("nan"))
             ls_ratio = r.get("ls_ratio", float("nan"))
+            fresh_cross = bool(r.get("bb_mid_cross_up" if side == "long" else "bb_mid_cross_dn", False))
+            wide_band = float(r.get("bb_wide", 0.0)) >= 1.0
             suit = compute_suitability(
                 side, prob=float(r[prob_col]), confident=bool(r[conf_col]),
                 funding_pct=funding, ls_ratio=ls_ratio,
+                fresh_cross=fresh_cross, wide_band=wide_band,
             )
             if _VERDICT_RANK.get(suit.verdict, 0) < min_verdict:
                 continue

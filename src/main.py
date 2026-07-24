@@ -318,7 +318,7 @@ def cmd_futures_signals(args: argparse.Namespace) -> int:
         signals = scanner.scan_signals(
             top_n=args.top_n, max_move_pct=max_move,
             fundamentals=fundamentals, min_quote_volume=args.min_volume * 1e6,
-            min_verdict=verdict_rank,
+            min_verdict=verdict_rank, confirm_trend=not args.no_confirm_trend,
         )
 
     print(f"\n=== Futures sinyalleri @ {datetime.now(timezone.utc).isoformat()} ===")
@@ -474,6 +474,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_fsig.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions (liquidity gate)")
     p_fsig.add_argument("--min-verdict", choices=["all", "dikkatli", "uygun"], default="all",
                         help="only show setups at/above this verdict (hide ZAYIF etc.)")
+    p_fsig.add_argument("--no-confirm-trend", action="store_true",
+                        help="disable the trend filter (allow LONGs on falling coins)")
     p_fsig.add_argument("--html", action="store_true", help="also write a colored HTML dashboard")
     p_fsig.add_argument("--open-html", action="store_true", help="open the HTML report in the browser")
     p_fsig.set_defaults(func=cmd_futures_signals)

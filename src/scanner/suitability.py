@@ -39,6 +39,8 @@ def compute_suitability(
     confident: bool,
     funding_pct: float,
     ls_ratio: float,
+    fresh_cross: bool = False,
+    wide_band: bool = False,
 ) -> Suitability:
     """Score a setup and produce a verdict with a short reason (Turkish)."""
     score = 0
@@ -47,6 +49,15 @@ def compute_suitability(
     if confident:
         score += 2
         notes.append("model emin")
+
+    # A fresh Bollinger mid-band crossover in the trade direction — stronger
+    # still with wide bands (a real move, not chop).
+    if fresh_cross:
+        score += 1
+        notes.append("taze orta-bant kesişimi")
+        if wide_band:
+            score += 1
+            notes.append("geniş bant")
     if prob >= 0.5:
         score += 2
     elif prob >= 0.4:

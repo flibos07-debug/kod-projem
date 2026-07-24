@@ -56,6 +56,35 @@ class SuitabilityTests(unittest.TestCase):
         s = compute_suitability("long", prob=0.5, confident=True, funding_pct=float("nan"), ls_ratio=float("nan"))
         self.assertIn(s.verdict, {"UYGUN", "DİKKATLİ", "ZAYIF"})
 
+    def test_fresh_cross_wide_band_bonus(self):
+        base = compute_suitability("long", prob=0.3, confident=False, funding_pct=-0.01, ls_ratio=0.9)
+        boosted = compute_suitability("long", prob=0.3, confident=False, funding_pct=-0.01, ls_ratio=0.9,
+                                      fresh_cross=True, wide_band=True)
+        self.assertEqual(boosted.score, base.score + 2)
+        self.assertIn("orta-bant", boosted.note)
+
+
+class TrendConfirmationTests(unittest.TestCase):
+    def test_falling_knife_long_rejected(self):
+        from src.scanner.futures_scanner import _direction_aligned
+
+        fk = pd.Series({"ema_ratio": -0.02, "bb_mid_dist": -0.03})
+        self.assertFalse(_direction_aligned(fk, "long"))
+        self.assertTrue(_direction_aligned(fk, "short"))
+
+    def test_turned_up_long_allowed(self):
+        from src.scanner.futures_scanner import _direction_aligned
+
+        up = pd.Series({"ema_ratio": 0.01, "bb_mid_dist": 0.005})
+        self.assertTrue(_direction_aligned(up, "long"))
+        self.assertFalse(_direction_aligned(up, "short"))
+
+    def test_no_info_does_not_block(self):
+        from src.scanner.futures_scanner import _direction_aligned
+
+        na = pd.Series({"ema_ratio": float("nan"), "bb_mid_dist": float("nan")})
+        self.assertTrue(_direction_aligned(na, "long"))
+
 
 class HtmlReportTests(unittest.TestCase):
     def _frame(self, side):
