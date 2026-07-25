@@ -19,6 +19,7 @@ and HTML renderers apply unchanged (``prob`` carries the technical score).
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 from dataclasses import dataclass
 
 import numpy as np
@@ -144,11 +145,19 @@ def momentum_signal(df: pd.DataFrame, params: MomentumParams | None = None) -> d
 
 class MomentumScanner:
     def __init__(self, client, *, base_timeframe: str = "1h", history_bars: int = 300,
-                 params: MomentumParams | None = None) -> None:
+                 params: MomentumParams | None = None, max_workers: int = 16) -> None:
         self.client = client
         self.base_timeframe = base_timeframe
         self.history_bars = history_bars
         self.params = params or MomentumParams()
+        self.max_workers = max_workers
+
+    def _fetch(self, sym: str):
+        try:
+            return sym, self.client.get_klines(sym, self.base_timeframe, limit=self.history_bars)
+        except Exception as exc:
+            logger.warning("Fetch failed for %s: %s", sym, exc)
+            return sym, None
 
     def scan_signals(
         self,
@@ -161,20 +170,35 @@ class MomentumScanner:
         min_score: float = 0.35,
     ) -> dict[str, pd.DataFrame]:
         fundamentals = fundamentals or {}
+
+        # Liquidity pre-filter (using the bulk volume) so we don't even fetch
+        # klines for coins we'd drop anyway.
+        if min_quote_volume > 0:
+            keep = []
+            for s in symbols:
+                v = fundamentals.get(s, {}).get("quote_volume", float("nan"))
+                if v != v or v >= min_quote_volume:  # keep unknown or liquid
+                    keep.append(s)
+            symbols = keep
+
+        # Fetch all klines concurrently — this is the whole speed-up.
+        total = len(symbols)
+        frames: dict[str, pd.DataFrame | None] = {}
+        with cf.ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+            for i, (sym, df) in enumerate(ex.map(self._fetch, symbols), 1):
+                frames[sym] = df
+                if i % 100 == 0:
+                    logger.info("Fetched %d/%d klines…", i, total)
+
         rows = []
         for sym in symbols:
-            try:
-                df = self.client.get_klines(sym, self.base_timeframe, limit=self.history_bars)
-                sig = momentum_signal(df, self.params)
-            except Exception as exc:
-                logger.warning("Momentum scan failed for %s: %s", sym, exc)
+            df = frames.get(sym)
+            if df is None:
                 continue
+            sig = momentum_signal(df, self.params)
             if sig is None:
                 continue
             fund = fundamentals.get(sym, {})
-            vol = fund.get("quote_volume", float("nan"))
-            if min_quote_volume > 0 and (vol != vol or vol < min_quote_volume):
-                continue
             side = "long" if sig["long_score"] >= sig["short_score"] else "short"
             score = sig[f"{side}_score"]
             if score < min_score:

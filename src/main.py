@@ -320,6 +320,7 @@ def cmd_futures_signals(args: argparse.Namespace) -> int:
             fundamentals=fundamentals, min_quote_volume=args.min_volume * 1e6,
             min_verdict=verdict_rank, confirm_trend=not args.no_confirm_trend,
         )
+        _enrich_fundamentals(client, signals)
 
     print(f"\n=== Futures sinyalleri @ {datetime.now(timezone.utc).isoformat()} ===")
     print(f"(taranan: {len(artifacts)} coin | TP2 ≤ %{args.max_move} | min hacim: {args.min_volume}M$)\n")
@@ -341,7 +342,12 @@ def cmd_futures_signals(args: argparse.Namespace) -> int:
 
 
 def _fetch_fundamentals(client, symbols: list[str]) -> dict:
-    """Best-effort futures context per symbol: 24h volume, funding, L/S, OI."""
+    """Bulk liquidity + funding for the whole set in just two API calls.
+
+    L/S ratio and open interest are per-symbol endpoints (no bulk form), so they
+    are fetched later — only for the handful of coins that make the final list
+    (see ``_enrich_fundamentals``).
+    """
     fundamentals: dict[str, dict] = {s: {} for s in symbols}
     try:
         tickers = client.get_ticker_24h()
@@ -350,24 +356,51 @@ def _fetch_fundamentals(client, symbols: list[str]) -> dict:
             fundamentals[s]["quote_volume"] = float(vol.get(s, float("nan")))
     except Exception as exc:
         logger.debug("24h volume unavailable: %s", exc)
-    for s in symbols:
-        try:
-            fr = client.get_funding_rate(s, limit=1)
-            if not fr.empty:
-                fundamentals[s]["funding"] = float(fr["fundingRate"].iloc[-1]) * 100.0
-        except Exception:
-            pass
-        try:
-            if hasattr(client, "get_long_short_ratio"):
-                fundamentals[s]["ls_ratio"] = client.get_long_short_ratio(s)
-        except Exception:
-            pass
-        try:
-            if hasattr(client, "get_open_interest"):
-                fundamentals[s]["open_interest"] = client.get_open_interest(s)
-        except Exception:
-            pass
+    try:
+        if hasattr(client, "get_all_funding"):
+            fmap = client.get_all_funding()  # one request, all symbols
+            for s in symbols:
+                if s in fmap:
+                    fundamentals[s]["funding"] = fmap[s]
+    except Exception as exc:
+        logger.debug("bulk funding unavailable: %s", exc)
     return fundamentals
+
+
+def _enrich_fundamentals(client, signals: dict) -> None:
+    """Fill L/S ratio and open interest for just the surfaced coins (in place)."""
+    symbols = []
+    for side in ("long", "short"):
+        df = signals.get(side)
+        if df is not None and not df.empty:
+            symbols += list(df["symbol"])
+    symbols = list(dict.fromkeys(symbols))
+    if not symbols:
+        return
+
+    import concurrent.futures as cf
+
+    ls: dict[str, float] = {}
+    oi: dict[str, float] = {}
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        ls_f = {ex.submit(client.get_long_short_ratio, s): s for s in symbols} if hasattr(client, "get_long_short_ratio") else {}
+        oi_f = {ex.submit(client.get_open_interest, s): s for s in symbols} if hasattr(client, "get_open_interest") else {}
+        for fut, s in ls_f.items():
+            try:
+                ls[s] = fut.result()
+            except Exception:
+                pass
+        for fut, s in oi_f.items():
+            try:
+                oi[s] = fut.result()
+            except Exception:
+                pass
+
+    for side in ("long", "short"):
+        df = signals.get(side)
+        if df is not None and not df.empty:
+            df["ls_ratio"] = df["symbol"].map(ls).fillna(df["ls_ratio"])
+            df["open_interest"] = df["symbol"].map(oi).fillna(df["open_interest"])
 
 
 def cmd_futures_breakout(args: argparse.Namespace) -> int:
@@ -398,6 +431,7 @@ def cmd_futures_breakout(args: argparse.Namespace) -> int:
             fundamentals=fundamentals, min_quote_volume=args.min_volume * 1e6,
             min_score=args.min_score,
         )
+        _enrich_fundamentals(client, signals)
 
     print(f"\n=== Breakout/Momentum taraması @ {datetime.now(timezone.utc).isoformat()} ===")
     print(f"(taranan: {len(symbols)} coin | {args.timeframe} | eğitim yok)\n")

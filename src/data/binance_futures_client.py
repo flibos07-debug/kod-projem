@@ -77,6 +77,18 @@ class BinanceFuturesClient(BinanceClient):
             df["fundingRate"] = pd.to_numeric(df["fundingRate"], errors="coerce")
         return df
 
+    def get_all_funding(self) -> dict[str, float]:
+        """Latest funding rate (%) for **every** symbol in one request."""
+        payload = self._request("/fapi/v1/premiumIndex")
+        rows = payload if isinstance(payload, list) else [payload]
+        out: dict[str, float] = {}
+        for r in rows:
+            try:
+                out[r["symbol"]] = float(r["lastFundingRate"]) * 100.0
+            except (TypeError, ValueError, KeyError):
+                continue
+        return out
+
     def get_open_interest(self, symbol: str) -> float:
         """Current open interest (number of open contracts) for a symbol."""
         payload = self._request("/fapi/v1/openInterest", {"symbol": symbol.upper()})
