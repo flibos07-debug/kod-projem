@@ -370,6 +370,53 @@ def _fetch_fundamentals(client, symbols: list[str]) -> dict:
     return fundamentals
 
 
+def cmd_futures_breakout(args: argparse.Namespace) -> int:
+    """Training-free technical scan of the whole universe (breakout/momentum)."""
+    args.market = "futures"
+    config = _load_config(args.config)
+    from .reporting.report import render_signals, save_signals
+    from .scanner.momentum_scanner import MomentumParams, MomentumScanner
+
+    with _make_client(args) as client:
+        if args.symbols:
+            symbols = [s.upper() for s in args.symbols]
+        elif args.top and hasattr(client, "get_perpetual_symbols"):
+            symbols = _discover_top_futures(client, args.top)
+        elif hasattr(client, "get_perpetual_symbols"):
+            symbols = client.get_perpetual_symbols()  # the whole universe
+        else:
+            logger.error("No symbols and this client has no universe discovery")
+            return 1
+
+        logger.info("Breakout-scanning %d symbols (no training needed)…", len(symbols))
+        fundamentals = _fetch_fundamentals(client, symbols)
+        params = MomentumParams(tp_mult=args.tp_mult, sl_mult=args.sl_mult)
+        scanner = MomentumScanner(client, base_timeframe=args.timeframe, params=params)
+        max_move = None if args.max_move <= 0 else args.max_move
+        signals = scanner.scan_signals(
+            symbols, top_n=args.top_n, max_move_pct=max_move,
+            fundamentals=fundamentals, min_quote_volume=args.min_volume * 1e6,
+            min_score=args.min_score,
+        )
+
+    print(f"\n=== Breakout/Momentum taraması @ {datetime.now(timezone.utc).isoformat()} ===")
+    print(f"(taranan: {len(symbols)} coin | {args.timeframe} | eğitim yok)\n")
+    print(render_signals(signals))
+    save_signals(signals, config.storage.report_directory)
+    if args.html:
+        from .reporting.html_report import save_html
+
+        meta = {"scanned": len(symbols), "max_move": args.max_move, "min_volume": args.min_volume}
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        html_path = Path(config.storage.report_directory) / f"breakout_{ts}.html"
+        save_html(signals, html_path, meta=meta)
+        print(f"\n🌐 HTML rapor: {html_path.resolve()}")
+        if args.open_html:
+            import webbrowser
+            webbrowser.open(html_path.resolve().as_uri())
+    return 0
+
+
 def cmd_futures_scan(args: argparse.Namespace) -> int:
     """Live two-sided scan: load directional artifacts and emit LONG/SHORT/FLAT."""
     args.market = "futures"
@@ -479,6 +526,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_fsig.add_argument("--html", action="store_true", help="also write a colored HTML dashboard")
     p_fsig.add_argument("--open-html", action="store_true", help="open the HTML report in the browser")
     p_fsig.set_defaults(func=cmd_futures_signals)
+
+    p_fbrk = sub.add_parser("futures-breakout", help="training-free technical scan (breakout/momentum) of all coins")
+    p_fbrk.add_argument("--symbols", nargs="*", default=[], help="symbols (default: whole universe)")
+    p_fbrk.add_argument("--top", type=int, default=None, help="scan only the top-N by volume (default: all)")
+    p_fbrk.add_argument("--top-n", type=int, default=10, help="how many per direction to show")
+    p_fbrk.add_argument("--timeframe", choices=["15m", "1h", "4h"], default="1h", help="chart timeframe")
+    p_fbrk.add_argument("--max-move", type=float, default=0.0, help="max TP2 move %% (0 = no cap)")
+    p_fbrk.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions")
+    p_fbrk.add_argument("--min-score", type=float, default=0.35, help="min technical score (0-1)")
+    p_fbrk.add_argument("--tp-mult", type=float, default=3.0, help="take-profit distance in ATRs")
+    p_fbrk.add_argument("--sl-mult", type=float, default=1.5, help="stop-loss distance in ATRs")
+    p_fbrk.add_argument("--html", action="store_true", help="also write a colored HTML dashboard")
+    p_fbrk.add_argument("--open-html", action="store_true", help="open the HTML report in the browser")
+    p_fbrk.set_defaults(func=cmd_futures_breakout)
     return parser
 
 
