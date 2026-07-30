@@ -130,11 +130,20 @@ def bb_retest_signal(f5: pd.DataFrame, f15: pd.DataFrame, p: BBStratParams | Non
     sl_pct = (stop / entry - 1.0) * 100.0 if entry else float("nan")
     tp_pct = (tp / entry - 1.0) * 100.0 if entry and np.isfinite(tp) else float("nan")
 
+    # Distance to the entry trigger (0 = at the retest band = about to fire).
+    # LONG fires at the lower band (%B->0); SHORT at the upper band (%B->1).
+    if side == "long":
+        entry_dist = max(pctb5, 0.0)
+    elif side == "short":
+        entry_dist = max(1.0 - pctb5, 0.0)
+    else:
+        entry_dist = 2.0
+
     return {
         "side": side, "stage": stage, "stage_score": _STAGE_SCORE[stage],
         "price": price, "squeeze15": squeezed, "flat15": flat, "break_ago": break_ago,
         "pctb5": pctb5, "entry": entry, "stop_loss": stop, "tp": tp,
-        "sl_pct": sl_pct, "tp_pct": tp_pct, "atr5": atr5,
+        "sl_pct": sl_pct, "tp_pct": tp_pct, "atr5": atr5, "entry_dist": entry_dist,
         "note": ", ".join(notes),
     }
 
@@ -199,8 +208,15 @@ class BBRetestScanner:
         }
 
     def _build(self, items: list[dict], top_n: int) -> pd.DataFrame:
+        # GİRİŞ first, then BEKLE ordered by proximity to the retest (closest to
+        # triggering on top), breaking ties by higher volume.
+        def _vol(x):
+            v = x.get("vol_ratio", 0.0)
+            return v if v == v else 0.0
+
+        ordered = sorted(items, key=lambda x: (-x["stage_score"], x.get("entry_dist", 2.0), -_vol(x)))
         out = []
-        for r in sorted(items, key=lambda x: (x["stage_score"], -abs(x.get("tp_pct") or 0)), reverse=True)[:top_n]:
+        for r in ordered[:top_n]:
             fund = r["fund"]
             out.append({
                 "symbol": r["symbol"], "stage": r["stage"], "side": r["side"].upper(),
