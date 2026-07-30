@@ -387,9 +387,11 @@ def _enrich_fundamentals(client, signals: dict) -> None:
 
     ls: dict[str, float] = {}
     oi: dict[str, float] = {}
+    oic: dict[str, float] = {}
     with cf.ThreadPoolExecutor(max_workers=8) as ex:
         ls_f = {ex.submit(client.get_long_short_ratio, s): s for s in symbols} if hasattr(client, "get_long_short_ratio") else {}
         oi_f = {ex.submit(client.get_open_interest, s): s for s in symbols} if hasattr(client, "get_open_interest") else {}
+        oic_f = {ex.submit(client.get_open_interest_change, s): s for s in symbols} if hasattr(client, "get_open_interest_change") else {}
         for fut, s in ls_f.items():
             try:
                 ls[s] = fut.result()
@@ -400,12 +402,19 @@ def _enrich_fundamentals(client, signals: dict) -> None:
                 oi[s] = fut.result()
             except Exception:
                 pass
+        for fut, s in oic_f.items():
+            try:
+                oic[s] = fut.result()
+            except Exception:
+                pass
 
     for side in ("long", "short"):
         df = signals.get(side)
         if df is not None and not df.empty:
             df["ls_ratio"] = df["symbol"].map(ls).fillna(df["ls_ratio"])
             df["open_interest"] = df["symbol"].map(oi).fillna(df["open_interest"])
+            if "oi_change" in df.columns:
+                df["oi_change"] = df["symbol"].map(oic).fillna(df["oi_change"])
 
 
 def cmd_futures_screener(args: argparse.Namespace) -> int:

@@ -100,6 +100,50 @@ def adx(
     )
 
 
+def rolling_vwap(df: pd.DataFrame, window: int = 24) -> pd.Series:
+    """Rolling Volume-Weighted Average Price over ``window`` bars."""
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    pv = (tp * df["volume"]).rolling(window, min_periods=max(2, window // 2)).sum()
+    vv = df["volume"].rolling(window, min_periods=max(2, window // 2)).sum()
+    return pv / vv.replace(0.0, np.nan)
+
+
+def supertrend(
+    high: pd.Series, low: pd.Series, close: pd.Series, period: int = 10, multiplier: float = 3.0
+) -> pd.DataFrame:
+    """Supertrend line and direction (+1 up-trend, -1 down-trend)."""
+    atr_ = atr(high, low, close, period)
+    hl2 = (high + low) / 2.0
+    upper = (hl2 + multiplier * atr_).to_numpy()
+    lower = (hl2 - multiplier * atr_).to_numpy()
+    close_a = close.to_numpy()
+    n = len(close_a)
+
+    final_upper = np.full(n, np.nan)
+    final_lower = np.full(n, np.nan)
+    direction = np.ones(n, dtype=int)
+    st = np.full(n, np.nan)
+
+    for i in range(1, n):
+        if np.isnan(upper[i]) or np.isnan(lower[i]):
+            continue
+        fu_prev = final_upper[i - 1]
+        fl_prev = final_lower[i - 1]
+        final_upper[i] = upper[i] if (np.isnan(fu_prev) or upper[i] < fu_prev or close_a[i - 1] > fu_prev) else fu_prev
+        final_lower[i] = lower[i] if (np.isnan(fl_prev) or lower[i] > fl_prev or close_a[i - 1] < fl_prev) else fl_prev
+
+        prev_dir = direction[i - 1]
+        if close_a[i] > final_upper[i]:
+            direction[i] = 1
+        elif close_a[i] < final_lower[i]:
+            direction[i] = -1
+        else:
+            direction[i] = prev_dir
+        st[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
+
+    return pd.DataFrame({"supertrend": st, "direction": direction}, index=close.index)
+
+
 def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
     """MACD line, signal line and histogram."""
     ema_fast = close.ewm(span=fast, adjust=False).mean()

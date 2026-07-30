@@ -97,6 +97,25 @@ class BinanceFuturesClient(BinanceClient):
         except (TypeError, ValueError):
             return float("nan")
 
+    def get_open_interest_change(self, symbol: str, *, period: str = "1h", limit: int = 8) -> float:
+        """Percent change in open interest over the last ``limit`` periods.
+
+        Rising OI with price is fresh money confirming the move; falling OI is
+        positions closing. A leading confirmation signal.
+        """
+        payload = self._request(
+            "/futures/data/openInterestHist",
+            {"symbol": symbol.upper(), "period": period, "limit": limit},
+        )
+        if isinstance(payload, list) and len(payload) >= 2:
+            try:
+                first = float(payload[0]["sumOpenInterest"])
+                last = float(payload[-1]["sumOpenInterest"])
+                return (last - first) / first * 100.0 if first else float("nan")
+            except (TypeError, ValueError, KeyError):
+                return float("nan")
+        return float("nan")
+
     def get_long_short_ratio(self, symbol: str, *, period: str = "1h") -> float:
         """Latest global long/short **account** ratio (>1 = crowd net long)."""
         payload = self._request(

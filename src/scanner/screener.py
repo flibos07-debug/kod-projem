@@ -21,7 +21,17 @@ import numpy as np
 import pandas as pd
 
 from ..data.resample import resample_to_timeframes
-from ..features.indicators import atr, bollinger, ema, macd, rsi, stoch_rsi
+from ..features.indicators import (
+    adx,
+    atr,
+    bollinger,
+    ema,
+    macd,
+    rolling_vwap,
+    rsi,
+    stoch_rsi,
+    supertrend,
+)
 from ..logging_utils import get_logger
 from .levels import compute_levels
 
@@ -87,6 +97,21 @@ def _tf_snapshot(df: pd.DataFrame, p: ScreenerParams) -> dict | None:
     vol_ratio = float(vol.iloc[-1] / vol_ma) if np.isfinite(vol_ma) and vol_ma > 0 else float("nan")
     atr_pct = float(atr(high, low, close, 14).iloc[-1] / c) if c else float("nan")
 
+    # "Big-picture" bias indicators (meaningful mainly on the higher timeframe).
+    ema200 = ema(close, 200)
+    e200 = float(ema200.iloc[-1])
+    ema200_pos = "na" if e200 != e200 else ("up" if c > e200 else "down")
+
+    st = supertrend(high, low, close)
+    st_dir = int(st["direction"].iloc[-1])
+    st_flip = st_dir != int(st["direction"].iloc[-2]) if len(st) > 1 else False
+
+    vwap = rolling_vwap(df, 24)
+    vw = float(vwap.iloc[-1])
+    vwap_pos = "na" if vw != vw else ("up" if c > vw else "down")
+
+    adx_v = float(adx(high, low, close, 14)["adx"].iloc[-1])
+
     # Trend is the primary directional vote; momentum/mean-reversion refine it.
     # RSI is reported for the trader but not scored directly, so an uptrend coin
     # is not pushed short merely for being overbought.
@@ -110,7 +135,8 @@ def _tf_snapshot(df: pd.DataFrame, p: ScreenerParams) -> dict | None:
         "price": c, "rsi": rsi_v, "trend": trend, "macd_dir": macd_dir, "macd_flip": macd_flip,
         "stoch_k": k, "stoch_d": d, "stoch_turn_up": stoch_turn_up, "stoch_turn_dn": stoch_turn_dn,
         "pctb": pctb, "squeeze": squeeze, "vol_ratio": vol_ratio, "atr_pct": atr_pct,
-        "bull": bull, "bear": bear,
+        "ema200_pos": ema200_pos, "st_dir": st_dir, "st_flip": st_flip,
+        "vwap_pos": vwap_pos, "adx": adx_v, "bull": bull, "bear": bear,
     }
 
 
@@ -123,28 +149,74 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
             return None
         snaps[tf] = s
 
-    wsum = sum(_TF_WEIGHT.get(tf, 1.0) for tf in p.timeframes)
-    max_per_tf = 3.0
-    long_score = sum(_TF_WEIGHT.get(tf, 1.0) * snaps[tf]["bull"] for tf in p.timeframes) / (wsum * max_per_tf)
-    short_score = sum(_TF_WEIGHT.get(tf, 1.0) * snaps[tf]["bear"] for tf in p.timeframes) / (wsum * max_per_tf)
+    ref = snaps.get("1h", snaps[p.timeframes[-1]])  # higher-timeframe = the bias
 
-    side = "long" if long_score >= short_score else "short"
+    # Directional score: higher-TF bias (EMA200, Supertrend, VWAP, MACD) is the
+    # backbone; lower-timeframe EMA trend refines it; reversal signals catch turns.
+    bull = bear = 0.0
+    if ref["ema200_pos"] == "up":
+        bull += 2.0
+    elif ref["ema200_pos"] == "down":
+        bear += 2.0
+    if ref["st_dir"] == 1:
+        bull += 2.0
+    elif ref["st_dir"] == -1:
+        bear += 2.0
+    if ref["vwap_pos"] == "up":
+        bull += 1.0
+    elif ref["vwap_pos"] == "down":
+        bear += 1.0
+    if ref["macd_dir"] == "up":
+        bull += 1.0
+    else:
+        bear += 1.0
+    for tf in ("5m", "15m"):
+        if tf in snaps:
+            if snaps[tf]["trend"] == "up":
+                bull += 0.5
+            elif snaps[tf]["trend"] == "down":
+                bear += 0.5
 
-    # Leading ("öncü") triggers, scanned across timeframes.
+    # Reversal ("dönüş") signals catch turns against the higher-TF bias.
+    rev_up = any(snaps[tf]["stoch_turn_up"] for tf in p.timeframes) or ref["pctb"] < 0.1
+    rev_dn = any(snaps[tf]["stoch_turn_dn"] for tf in p.timeframes) or ref["pctb"] > 0.9
+    if rev_up:
+        bull += 1.0
+    if rev_dn:
+        bear += 1.0
+
+    net = bull - bear
+    side = "long" if net >= 0 else "short"
+    long_score = max(bull - bear, 0.0) / 8.0
+    short_score = max(bear - bull, 0.0) / 8.0
+    long_score, short_score = min(long_score, 1.0), min(short_score, 1.0)
+
+    # Setup type: squeeze -> breakout; strong ADX -> trend; else a reversal.
+    squeeze_any = any(snaps[tf]["squeeze"] for tf in p.timeframes)
+    if squeeze_any:
+        setup = "KIRILIM"
+    elif ref["adx"] >= 25:
+        setup = "TREND"
+    elif (side == "long" and rev_up) or (side == "short" and rev_dn):
+        setup = "DÖNÜŞ"
+    else:
+        setup = "TREND" if ref["adx"] >= 20 else "NÖTR"
+
+    # Leading ("öncü") triggers.
     leading: list[str] = []
-    if any(snaps[tf]["squeeze"] for tf in p.timeframes):
+    if squeeze_any:
         leading.append("SIKIŞMA (kırılım yakın)")
     vmax = max((snaps[tf]["vol_ratio"] for tf in p.timeframes if snaps[tf]["vol_ratio"] == snaps[tf]["vol_ratio"]), default=float("nan"))
     if vmax == vmax and vmax >= p.vol_spike:
         leading.append(f"HACİM x{vmax:.1f}")
-    if side == "long" and any(snaps[tf]["stoch_turn_up"] for tf in p.timeframes):
-        leading.append("StochRSI dipten dönüş")
-    if side == "short" and any(snaps[tf]["stoch_turn_dn"] for tf in p.timeframes):
-        leading.append("StochRSI tepeden dönüş")
+    if ref["st_flip"]:
+        leading.append("Supertrend dönüş")
+    if side == "long" and rev_up:
+        leading.append("dipten dönüş")
+    if side == "short" and rev_dn:
+        leading.append("tepeden dönüş")
     if any(snaps[tf]["macd_flip"] for tf in ("15m", "1h") if tf in snaps):
         leading.append("MACD dönüş")
-
-    ref = snaps.get("1h", snaps[p.timeframes[-1]])
     return {
         "side": side,
         "long_score": long_score,
@@ -161,8 +233,13 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
         "macd_1h": ref["macd_dir"],
         "stoch_1h": ref["stoch_k"],
         "bb_1h": ref["pctb"],
-        "squeeze": any(snaps[tf]["squeeze"] for tf in p.timeframes),
+        "squeeze": squeeze_any,
         "vol_ratio": vmax,
+        "setup": setup,
+        "ema200_1h": ref["ema200_pos"],
+        "supertrend_1h": "up" if ref["st_dir"] == 1 else "down",
+        "vwap_1h": ref["vwap_pos"],
+        "adx_1h": ref["adx"],
         "leading": leading,
         "atr_abs": ref["atr_pct"] * ref["price"] if ref["atr_pct"] == ref["atr_pct"] else float("nan"),
     }
@@ -178,10 +255,13 @@ class Screener:
         self.max_workers = max_workers
 
     def _fetch(self, sym: str):
+        # 5m gives the 5m + resampled 15m views; 1h is fetched directly so the
+        # 1h EMA200 has enough history (200 bars).
         try:
-            base = self.client.get_klines(sym, self.base_timeframe, limit=self.history_bars)
-            frames = resample_to_timeframes(base, list(self.params.timeframes),
-                                            base_timeframe=self.base_timeframe, drop_incomplete=True)
+            b5 = self.client.get_klines(sym, "5m", limit=500)
+            b1h = self.client.get_klines(sym, "1h", limit=300)
+            frames = resample_to_timeframes(b5, ["5m", "15m"], base_timeframe="5m", drop_incomplete=True)
+            frames["1h"] = b1h
             return sym, frames
         except Exception as exc:
             logger.warning("Fetch failed for %s: %s", sym, exc)
@@ -255,8 +335,11 @@ class Screener:
                 "trend_5m": r["trend_5m"], "trend_15m": r["trend_15m"], "trend_1h": r["trend_1h"],
                 "macd_1h": r["macd_1h"], "stoch_1h": r["stoch_1h"], "bb_1h": r["bb_1h"],
                 "squeeze": r["squeeze"], "vol_ratio": r["vol_ratio"], "atr_pct": r["atr_pct_1h"],
+                "setup": r["setup"], "ema200": r["ema200_1h"], "supertrend": r["supertrend_1h"],
+                "vwap": r["vwap_1h"], "adx": r["adx_1h"],
                 "funding": fund.get("funding", float("nan")), "ls_ratio": fund.get("ls_ratio", float("nan")),
                 "open_interest": fund.get("open_interest", float("nan")),
+                "oi_change": fund.get("oi_change", float("nan")),
                 "leading": ", ".join(r["leading"]) or "-",
                 "entry_low": lv.entry_low if lv else float("nan"),
                 "entry_high": lv.entry_high if lv else float("nan"),
