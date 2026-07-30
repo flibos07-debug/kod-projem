@@ -49,6 +49,8 @@ def render_screener(signals: dict[str, pd.DataFrame]) -> str:
             bias = f"{_TREND_ARROW.get(r.get('ema200','na'),'·')}{_TREND_ARROW.get(r.get('supertrend','na'),'·')}{_TREND_ARROW.get(r.get('vwap','na'),'·')}"
             rows.append({
                 "coin": r["symbol"],
+                "durum": r.get("state", "-"),
+                "uzama%": _n(r.get("ext_pct"), "{:+.1f}"),
                 "setup": r.get("setup", "-"),
                 "skor": _n(r["score"], "{:.2f}"),
                 "24s%": _n(r.get("chg24h"), "{:+.1f}"),
@@ -88,11 +90,15 @@ tbody tr:nth-child(odd){ background:#161c29; } tbody tr:nth-child(even){ backgro
 .s-rev{background:#2a1533;color:#d6a8ff;border-color:#805ad5;}
 .s-break{background:#3a300f;color:#fcd34d;border-color:#d4a017;}
 .s-flat{background:#232a3a;color:#9aa4b2;border-color:#3a4358;}
+.st-early{background:#16351f;color:#4ade80;border-color:#2ecc71;}
+.st-mid{background:#232a3a;color:#cbd5e1;border-color:#3a4358;}
+.st-late{background:#3a1717;color:#f87171;border-color:#e74c3c;}
 .foot{color:#6b7280;font-size:11px;margin-top:18px;border-top:1px solid #232a3a;padding-top:9px;}
 """
 
 _HEAD = [
-    ("sym", "Coin"), ("setup", "Setup"), ("score", "Skor"), ("price", "Fiyat"), ("chg", "24s%"),
+    ("sym", "Coin"), ("state", "Durum"), ("ext", "Uzama%"), ("setup", "Setup"),
+    ("score", "Skor"), ("price", "Fiyat"), ("chg", "24s%"),
     ("rsi", "RSI 5m/15m/1h"), ("trend", "Trend 5/15/1h"),
     ("bias", "E200/ST/VWAP"), ("adx", "ADX"), ("macd", "MACD"),
     ("stoch", "StochRSI"), ("bb", "BB %B"), ("vol", "Hacim"), ("atr", "ATR%"),
@@ -102,6 +108,7 @@ _HEAD = [
 ]
 
 _SETUP_CLASS = {"TREND": "s-trend", "DÖNÜŞ": "s-rev", "KIRILIM": "s-break", "NÖTR": "s-flat"}
+_STATE_CLASS = {"BAŞLANGIÇ": "st-early", "ORTA": "st-mid", "UZAMIŞ": "st-late"}
 
 
 def _trend_html(t):
@@ -122,10 +129,16 @@ def _row_html(r):
     lead_html = f'<span class="badge">{lead}</span>' if lead and lead != "-" else "-"
     setup = str(r.get("setup", "-"))
     setup_html = f'<span class="badge {_SETUP_CLASS.get(setup, "s-flat")}">{html.escape(setup)}</span>'
+    state = str(r.get("state", "-"))
+    state_html = f'<span class="badge {_STATE_CLASS.get(state, "s-flat")}">{html.escape(state)}</span>'
+    ext = r.get("ext_pct")
+    ext_html = "-" if ext is None or ext != ext else f'{ext:+.1f}'
     oichg = r.get("oi_change")
     oichg_html = "-" if oichg is None or oichg != oichg else f'<span class="{"up" if oichg >= 0 else "dn"}">{oichg:+.1f}</span>'
     return "<tr>" + "".join([
         f'<td class="sym">{html.escape(str(r["symbol"]))}</td>',
+        f'<td>{state_html}</td>',
+        f'<td>{ext_html}</td>',
         f'<td>{setup_html}</td>',
         f'<td>{r["score"]:.2f}</td>',
         f'<td>{_price(r["price"])}</td>',

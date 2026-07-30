@@ -444,6 +444,7 @@ def cmd_futures_screener(args: argparse.Namespace) -> int:
             min_quote_volume=args.min_volume * 1e6, min_score=args.min_score,
             rsi_below=args.rsi_below, rsi_above=args.rsi_above,
             require_squeeze=args.squeeze, require_vol_spike=args.vol_spike,
+            only_early=args.early, max_ext_pct=args.max_ext,
         )
         _enrich_fundamentals(client, signals)
 
@@ -643,6 +644,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_scr.add_argument("--rsi-above", type=float, default=None, help="only coins with 1h RSI above this")
     p_scr.add_argument("--squeeze", action="store_true", help="only Bollinger-squeeze coins (breakout imminent)")
     p_scr.add_argument("--vol-spike", action="store_true", help="only coins with a volume spike")
+    p_scr.add_argument("--early", action="store_true", help="hide already-extended coins (only early/fresh moves)")
+    p_scr.add_argument("--max-ext", type=float, default=None, help="max %% distance from 21-EMA (drop chasers)")
     p_scr.add_argument("--tp-mult", type=float, default=2.0, help="reference TP distance in ATRs")
     p_scr.add_argument("--sl-mult", type=float, default=1.0, help="reference SL distance in ATRs")
     p_scr.add_argument("--html", action="store_true", help="write a colored HTML screener")

@@ -48,9 +48,11 @@ class ScreenerParams:
     ema_slow: int = 21
     bb_period: int = 20
     vol_ma: int = 20
-    squeeze_lookback: int = 50
+    squeeze_lookback: int = 30  # keep < the ~41 1h bars a 500-bar 5m fetch yields
     squeeze_q: float = 0.15     # bandwidth in the lowest 15% -> squeeze
     vol_spike: float = 2.0
+    fresh_bars: int = 3          # Supertrend flip within this many bars = "early"
+    max_ext_pct: float = 5.0     # price >5% from 21-EMA = already extended (chaser)
     tp_mult: float = 2.0
     sl_mult: float = 1.0
     timeframes: tuple[str, ...] = TIMEFRAMES
@@ -60,7 +62,7 @@ def _sign(x: float) -> int:
     return 1 if x > 0 else (-1 if x < 0 else 0)
 
 
-def _tf_snapshot(df: pd.DataFrame, p: ScreenerParams) -> dict | None:
+def _tf_snapshot(df: pd.DataFrame, p: ScreenerParams, *, want_ema200: bool = False, want_bias: bool = False) -> dict | None:
     if df is None or len(df) < max(p.squeeze_lookback, p.bb_period) + 5:
         return None
     close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
@@ -97,20 +99,33 @@ def _tf_snapshot(df: pd.DataFrame, p: ScreenerParams) -> dict | None:
     vol_ratio = float(vol.iloc[-1] / vol_ma) if np.isfinite(vol_ma) and vol_ma > 0 else float("nan")
     atr_pct = float(atr(high, low, close, 14).iloc[-1] / c) if c else float("nan")
 
-    # "Big-picture" bias indicators (meaningful mainly on the higher timeframe).
-    ema200 = ema(close, 200)
-    e200 = float(ema200.iloc[-1])
-    ema200_pos = "na" if e200 != e200 else ("up" if c > e200 else "down")
+    # Heavy "big-picture" indicators are computed only where they are used:
+    # EMA200 on the 5m frame (enough bars), Supertrend/VWAP/ADX on the 1h frame.
+    ema200_pos = "na"
+    if want_ema200:
+        e200 = float(ema(close, 200).iloc[-1])
+        ema200_pos = "na" if e200 != e200 else ("up" if c > e200 else "down")
 
-    st = supertrend(high, low, close)
-    st_dir = int(st["direction"].iloc[-1])
-    st_flip = st_dir != int(st["direction"].iloc[-2]) if len(st) > 1 else False
+    st_dir, st_flip, vwap_pos, adx_v = 0, False, "na", float("nan")
+    bars_since_flip = 999
+    if want_bias:
+        st = supertrend(high, low, close)
+        dir_arr = st["direction"].to_numpy()
+        st_dir = int(dir_arr[-1])
+        st_flip = len(dir_arr) > 1 and st_dir != int(dir_arr[-2])
+        # How many bars ago did the trend flip? (0 = flipped this bar = earliest.)
+        bars_since_flip = 0
+        for j in range(len(dir_arr) - 2, -1, -1):
+            if dir_arr[j] == st_dir:
+                bars_since_flip += 1
+            else:
+                break
+        vw = float(rolling_vwap(df, 24).iloc[-1])
+        vwap_pos = "na" if vw != vw else ("up" if c > vw else "down")
+        adx_v = float(adx(high, low, close, 14)["adx"].iloc[-1])
 
-    vwap = rolling_vwap(df, 24)
-    vw = float(vwap.iloc[-1])
-    vwap_pos = "na" if vw != vw else ("up" if c > vw else "down")
-
-    adx_v = float(adx(high, low, close, 14)["adx"].iloc[-1])
+    # Extension: how far price has run from its 21-EMA (in %). Small = early.
+    ext_pct = (c / ema_s - 1.0) * 100.0 if ema_s and np.isfinite(ema_s) else float("nan")
 
     # Trend is the primary directional vote; momentum/mean-reversion refine it.
     # RSI is reported for the trader but not scored directly, so an uptrend coin
@@ -136,7 +151,8 @@ def _tf_snapshot(df: pd.DataFrame, p: ScreenerParams) -> dict | None:
         "stoch_k": k, "stoch_d": d, "stoch_turn_up": stoch_turn_up, "stoch_turn_dn": stoch_turn_dn,
         "pctb": pctb, "squeeze": squeeze, "vol_ratio": vol_ratio, "atr_pct": atr_pct,
         "ema200_pos": ema200_pos, "st_dir": st_dir, "st_flip": st_flip,
-        "vwap_pos": vwap_pos, "adx": adx_v, "bull": bull, "bear": bear,
+        "vwap_pos": vwap_pos, "adx": adx_v, "ext_pct": ext_pct,
+        "bars_since_flip": bars_since_flip, "bull": bull, "bear": bear,
     }
 
 
@@ -144,19 +160,22 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
     p = p or ScreenerParams()
     snaps = {}
     for tf in p.timeframes:
-        s = _tf_snapshot(frames.get(tf), p)
+        s = _tf_snapshot(frames.get(tf), p, want_ema200=(tf == "5m"), want_bias=(tf == "1h"))
         if s is None:
             return None
         snaps[tf] = s
 
     ref = snaps.get("1h", snaps[p.timeframes[-1]])  # higher-timeframe = the bias
+    # EMA200 comes from the 5m frame, which has enough bars for it (the 1h frame
+    # resampled from 500 5m bars is too short for a 200-EMA).
+    ema200_pos = snaps.get("5m", ref)["ema200_pos"]
 
     # Directional score: higher-TF bias (EMA200, Supertrend, VWAP, MACD) is the
     # backbone; lower-timeframe EMA trend refines it; reversal signals catch turns.
     bull = bear = 0.0
-    if ref["ema200_pos"] == "up":
+    if ema200_pos == "up":
         bull += 2.0
-    elif ref["ema200_pos"] == "down":
+    elif ema200_pos == "down":
         bear += 2.0
     if ref["st_dir"] == 1:
         bull += 2.0
@@ -185,14 +204,38 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
     if rev_dn:
         bear += 1.0
 
+    squeeze_any = any(snaps[tf]["squeeze"] for tf in p.timeframes)
+
+    # Early vs extended: a fresh Supertrend flip means the move just started
+    # (what we want); a large distance from the 21-EMA means it already ran.
+    ext = ref.get("ext_pct", float("nan"))
+    bsf = ref.get("bars_since_flip", 999)
+    fresh_flip = bsf <= p.fresh_bars
+    if fresh_flip:
+        if ref["st_dir"] == 1:
+            bull += 1.0
+        elif ref["st_dir"] == -1:
+            bear += 1.0
+
+    extended = bool(np.isfinite(ext) and abs(ext) >= p.max_ext_pct)
+    if extended:  # penalise chasers so early setups rank higher
+        bull *= 0.55
+        bear *= 0.55
+
     net = bull - bear
     side = "long" if net >= 0 else "short"
-    long_score = max(bull - bear, 0.0) / 8.0
-    short_score = max(bear - bull, 0.0) / 8.0
+    long_score = max(bull - bear, 0.0) / 9.0
+    short_score = max(bear - bull, 0.0) / 9.0
     long_score, short_score = min(long_score, 1.0), min(short_score, 1.0)
 
+    if fresh_flip or squeeze_any:
+        state = "BAŞLANGIÇ"
+    elif extended:
+        state = "UZAMIŞ"
+    else:
+        state = "ORTA"
+
     # Setup type: squeeze -> breakout; strong ADX -> trend; else a reversal.
-    squeeze_any = any(snaps[tf]["squeeze"] for tf in p.timeframes)
     if squeeze_any:
         setup = "KIRILIM"
     elif ref["adx"] >= 25:
@@ -209,8 +252,8 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
     vmax = max((snaps[tf]["vol_ratio"] for tf in p.timeframes if snaps[tf]["vol_ratio"] == snaps[tf]["vol_ratio"]), default=float("nan"))
     if vmax == vmax and vmax >= p.vol_spike:
         leading.append(f"HACİM x{vmax:.1f}")
-    if ref["st_flip"]:
-        leading.append("Supertrend dönüş")
+    if fresh_flip:
+        leading.append(f"YENİ dönüş ({bsf} bar önce)")
     if side == "long" and rev_up:
         leading.append("dipten dönüş")
     if side == "short" and rev_dn:
@@ -236,7 +279,10 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
         "squeeze": squeeze_any,
         "vol_ratio": vmax,
         "setup": setup,
-        "ema200_1h": ref["ema200_pos"],
+        "state": state,
+        "ext_pct": ext,
+        "bars_since_flip": bsf,
+        "ema200_1h": ema200_pos,
         "supertrend_1h": "up" if ref["st_dir"] == 1 else "down",
         "vwap_1h": ref["vwap_pos"],
         "adx_1h": ref["adx"],
@@ -246,7 +292,7 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
 
 
 class Screener:
-    def __init__(self, client, *, base_timeframe: str = "5m", history_bars: int = 1000,
+    def __init__(self, client, *, base_timeframe: str = "5m", history_bars: int = 500,
                  params: ScreenerParams | None = None, max_workers: int = 16) -> None:
         self.client = client
         self.base_timeframe = base_timeframe
@@ -255,13 +301,12 @@ class Screener:
         self.max_workers = max_workers
 
     def _fetch(self, sym: str):
-        # 5m gives the 5m + resampled 15m views; 1h is fetched directly so the
-        # 1h EMA200 has enough history (200 bars).
+        # ONE request per coin (low weight -> fast, no rate-limit stalls): pull
+        # 5m and resample to 15m/1h. EMA200 is taken from the 5m frame (500 bars
+        # ~ 17h), which is a solid intraday major-trend filter.
         try:
-            b5 = self.client.get_klines(sym, "5m", limit=500)
-            b1h = self.client.get_klines(sym, "1h", limit=300)
-            frames = resample_to_timeframes(b5, ["5m", "15m"], base_timeframe="5m", drop_incomplete=True)
-            frames["1h"] = b1h
+            b5 = self.client.get_klines(sym, "5m", limit=self.history_bars)
+            frames = resample_to_timeframes(b5, ["5m", "15m", "1h"], base_timeframe="5m", drop_incomplete=True)
             return sym, frames
         except Exception as exc:
             logger.warning("Fetch failed for %s: %s", sym, exc)
@@ -279,6 +324,8 @@ class Screener:
         rsi_above: float | None = None,
         require_squeeze: bool = False,
         require_vol_spike: bool = False,
+        only_early: bool = False,
+        max_ext_pct: float | None = None,
     ) -> dict[str, pd.DataFrame]:
         fundamentals = fundamentals or {}
         if min_quote_volume > 0:
@@ -310,6 +357,10 @@ class Screener:
                 continue
             if require_vol_spike and not (row["vol_ratio"] == row["vol_ratio"] and row["vol_ratio"] >= self.params.vol_spike):
                 continue
+            if only_early and row["state"] == "UZAMIŞ":
+                continue          # hide coins that already ran
+            if max_ext_pct is not None and row["ext_pct"] == row["ext_pct"] and abs(row["ext_pct"]) > max_ext_pct:
+                continue
             row["symbol"] = sym
             row["fund"] = fundamentals.get(sym, {})
             rows.append(row)
@@ -335,7 +386,8 @@ class Screener:
                 "trend_5m": r["trend_5m"], "trend_15m": r["trend_15m"], "trend_1h": r["trend_1h"],
                 "macd_1h": r["macd_1h"], "stoch_1h": r["stoch_1h"], "bb_1h": r["bb_1h"],
                 "squeeze": r["squeeze"], "vol_ratio": r["vol_ratio"], "atr_pct": r["atr_pct_1h"],
-                "setup": r["setup"], "ema200": r["ema200_1h"], "supertrend": r["supertrend_1h"],
+                "setup": r["setup"], "state": r["state"], "ext_pct": r["ext_pct"],
+                "ema200": r["ema200_1h"], "supertrend": r["supertrend_1h"],
                 "vwap": r["vwap_1h"], "adx": r["adx_1h"],
                 "funding": fund.get("funding", float("nan")), "ls_ratio": fund.get("ls_ratio", float("nan")),
                 "open_interest": fund.get("open_interest", float("nan")),
