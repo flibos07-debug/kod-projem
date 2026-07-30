@@ -462,6 +462,47 @@ def cmd_futures_screener(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_futures_bbstrat(args: argparse.Namespace) -> int:
+    """Bollinger squeeze -> mid-band break -> retest strategy scan."""
+    args.market = "futures"
+    config = _load_config(args.config)
+    from .reporting.strategy_report import render_strategy, save_strategy_html
+    from .scanner.bb_retest import BBRetestScanner, BBStratParams
+
+    with _make_client(args) as client:
+        if args.symbols:
+            symbols = [s.upper() for s in args.symbols]
+        elif args.top and hasattr(client, "get_perpetual_symbols"):
+            symbols = _discover_top_futures(client, args.top)
+        elif hasattr(client, "get_perpetual_symbols"):
+            symbols = client.get_perpetual_symbols()
+        else:
+            logger.error("No symbols and no universe discovery")
+            return 1
+
+        logger.info("BB-retest scanning %d symbols…", len(symbols))
+        fundamentals = _fetch_fundamentals(client, symbols)
+        scanner = BBRetestScanner(client, params=BBStratParams())
+        signals = scanner.scan(
+            symbols, top_n=args.top_n, fundamentals=fundamentals,
+            min_quote_volume=args.min_volume * 1e6, include_watch=args.watch,
+        )
+        _enrich_fundamentals(client, {"long": signals["long"], "short": signals["short"]})
+
+    print(f"\n=== BB Sıkışma→Kırılım→Retest @ {datetime.now(timezone.utc).isoformat()} ===")
+    print(f"(taranan: {len(symbols)} coin)\n")
+    print(render_strategy(signals))
+    if args.html:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        html_path = Path(config.storage.report_directory) / f"bbstrat_{ts}.html"
+        save_strategy_html(signals, html_path, meta={"scanned": len(symbols)})
+        print(f"\n🌐 HTML: {html_path.resolve()}")
+        if args.open_html:
+            import webbrowser
+            webbrowser.open(html_path.resolve().as_uri())
+    return 0
+
+
 def cmd_futures_breakout(args: argparse.Namespace) -> int:
     """Training-free technical scan of the whole universe (breakout/momentum)."""
     args.market = "futures"
@@ -651,6 +692,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_scr.add_argument("--html", action="store_true", help="write a colored HTML screener")
     p_scr.add_argument("--open-html", action="store_true", help="open the HTML in the browser")
     p_scr.set_defaults(func=cmd_futures_screener)
+
+    p_bb = sub.add_parser("futures-bbstrat", help="Bollinger squeeze->break->retest strategy (15m yön, 5m tetik)")
+    p_bb.add_argument("--symbols", nargs="*", default=[], help="symbols (default: whole universe)")
+    p_bb.add_argument("--top", type=int, default=None, help="scan only top-N by volume")
+    p_bb.add_argument("--top-n", type=int, default=20, help="how many per section to show")
+    p_bb.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions")
+    p_bb.add_argument("--watch", action="store_true", help="also list squeezing coins (İZLE)")
+    p_bb.add_argument("--html", action="store_true", help="write a colored HTML report")
+    p_bb.add_argument("--open-html", action="store_true", help="open the HTML in the browser")
+    p_bb.set_defaults(func=cmd_futures_bbstrat)
     return parser
 
 
