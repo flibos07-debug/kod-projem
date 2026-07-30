@@ -170,6 +170,8 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
     # resampled from 500 5m bars is too short for a 200-EMA).
     ema200_pos = snaps.get("5m", ref)["ema200_pos"]
 
+    vmax = max((snaps[tf]["vol_ratio"] for tf in p.timeframes if snaps[tf]["vol_ratio"] == snaps[tf]["vol_ratio"]), default=float("nan"))
+
     # Directional score: higher-TF bias (EMA200, Supertrend, VWAP, MACD) is the
     # backbone; lower-timeframe EMA trend refines it; reversal signals catch turns.
     bull = bear = 0.0
@@ -226,6 +228,21 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
     side = "long" if net >= 0 else "short"
     long_score = max(bull - bear, 0.0) / 9.0
     short_score = max(bear - bull, 0.0) / 9.0
+
+    # Volume confirmation: a move on real volume is trustworthy; a "breakout" on
+    # thin volume is not. Boost vol-spike setups, dampen dead ones.
+    if np.isfinite(vmax):
+        if vmax >= p.vol_spike:
+            vol_factor = 1.20
+        elif vmax >= 1.5:
+            vol_factor = 1.10
+        elif vmax < 0.7:
+            vol_factor = 0.70
+        else:
+            vol_factor = 1.0
+        long_score *= vol_factor
+        short_score *= vol_factor
+
     long_score, short_score = min(long_score, 1.0), min(short_score, 1.0)
 
     if fresh_flip or squeeze_any:
@@ -249,7 +266,6 @@ def screen_symbol(frames: dict[str, pd.DataFrame], p: ScreenerParams | None = No
     leading: list[str] = []
     if squeeze_any:
         leading.append("SIKIŞMA (kırılım yakın)")
-    vmax = max((snaps[tf]["vol_ratio"] for tf in p.timeframes if snaps[tf]["vol_ratio"] == snaps[tf]["vol_ratio"]), default=float("nan"))
     if vmax == vmax and vmax >= p.vol_spike:
         leading.append(f"HACİM x{vmax:.1f}")
     if fresh_flip:
