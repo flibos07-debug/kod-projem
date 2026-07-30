@@ -352,10 +352,15 @@ def _fetch_fundamentals(client, symbols: list[str]) -> dict:
     try:
         tickers = client.get_ticker_24h()
         vol = dict(zip(tickers["symbol"], tickers.get("quoteVolume", [])))
+        chg = dict(zip(tickers["symbol"], tickers.get("priceChangePercent", [])))
         for s in symbols:
             fundamentals[s]["quote_volume"] = float(vol.get(s, float("nan")))
+            try:
+                fundamentals[s]["chg24h"] = float(chg.get(s, float("nan")))
+            except (TypeError, ValueError):
+                pass
     except Exception as exc:
-        logger.debug("24h volume unavailable: %s", exc)
+        logger.debug("24h ticker unavailable: %s", exc)
     try:
         if hasattr(client, "get_all_funding"):
             fmap = client.get_all_funding()  # one request, all symbols
@@ -401,6 +406,50 @@ def _enrich_fundamentals(client, signals: dict) -> None:
         if df is not None and not df.empty:
             df["ls_ratio"] = df["symbol"].map(ls).fillna(df["ls_ratio"])
             df["open_interest"] = df["symbol"].map(oi).fillna(df["open_interest"])
+
+
+def cmd_futures_screener(args: argparse.Namespace) -> int:
+    """Multi-timeframe (5m/15m/1h) technical screener — LONG/SHORT candidates."""
+    args.market = "futures"
+    config = _load_config(args.config)
+    from .reporting.screener_report import render_screener, save_screener_html
+    from .scanner.screener import Screener, ScreenerParams
+
+    with _make_client(args) as client:
+        if args.symbols:
+            symbols = [s.upper() for s in args.symbols]
+        elif args.top and hasattr(client, "get_perpetual_symbols"):
+            symbols = _discover_top_futures(client, args.top)
+        elif hasattr(client, "get_perpetual_symbols"):
+            symbols = client.get_perpetual_symbols()
+        else:
+            logger.error("No symbols and no universe discovery on this client")
+            return 1
+
+        logger.info("Screening %d symbols on 5m/15m/1h…", len(symbols))
+        fundamentals = _fetch_fundamentals(client, symbols)
+        params = ScreenerParams(tp_mult=args.tp_mult, sl_mult=args.sl_mult)
+        screener = Screener(client, params=params)
+        signals = screener.scan(
+            symbols, top_n=args.top_n, fundamentals=fundamentals,
+            min_quote_volume=args.min_volume * 1e6, min_score=args.min_score,
+            rsi_below=args.rsi_below, rsi_above=args.rsi_above,
+            require_squeeze=args.squeeze, require_vol_spike=args.vol_spike,
+        )
+        _enrich_fundamentals(client, signals)
+
+    print(f"\n=== Futures Screener (5m/15m/1h) @ {datetime.now(timezone.utc).isoformat()} ===")
+    print(f"(taranan: {len(symbols)} coin | eğitim yok)\n")
+    print(render_screener(signals))
+    if args.html:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        html_path = Path(config.storage.report_directory) / f"screener_{ts}.html"
+        save_screener_html(signals, html_path, meta={"scanned": len(symbols)})
+        print(f"\n🌐 HTML: {html_path.resolve()}")
+        if args.open_html:
+            import webbrowser
+            webbrowser.open(html_path.resolve().as_uri())
+    return 0
 
 
 def cmd_futures_breakout(args: argparse.Namespace) -> int:
@@ -574,6 +623,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_fbrk.add_argument("--html", action="store_true", help="also write a colored HTML dashboard")
     p_fbrk.add_argument("--open-html", action="store_true", help="open the HTML report in the browser")
     p_fbrk.set_defaults(func=cmd_futures_breakout)
+
+    p_scr = sub.add_parser("futures-screener", help="multi-timeframe (5m/15m/1h) technical screener")
+    p_scr.add_argument("--symbols", nargs="*", default=[], help="symbols (default: whole universe)")
+    p_scr.add_argument("--top", type=int, default=None, help="scan only top-N by volume (default: all)")
+    p_scr.add_argument("--top-n", type=int, default=15, help="how many candidates per side to show")
+    p_scr.add_argument("--min-score", type=float, default=0.35, help="min alignment score (0-1)")
+    p_scr.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions")
+    p_scr.add_argument("--rsi-below", type=float, default=None, help="only coins with 1h RSI below this")
+    p_scr.add_argument("--rsi-above", type=float, default=None, help="only coins with 1h RSI above this")
+    p_scr.add_argument("--squeeze", action="store_true", help="only Bollinger-squeeze coins (breakout imminent)")
+    p_scr.add_argument("--vol-spike", action="store_true", help="only coins with a volume spike")
+    p_scr.add_argument("--tp-mult", type=float, default=2.0, help="reference TP distance in ATRs")
+    p_scr.add_argument("--sl-mult", type=float, default=1.0, help="reference SL distance in ATRs")
+    p_scr.add_argument("--html", action="store_true", help="write a colored HTML screener")
+    p_scr.add_argument("--open-html", action="store_true", help="open the HTML in the browser")
+    p_scr.set_defaults(func=cmd_futures_screener)
     return parser
 
 

@@ -100,6 +100,28 @@ def adx(
     )
 
 
+def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
+    """MACD line, signal line and histogram."""
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    line = ema_fast - ema_slow
+    sig = line.ewm(span=signal, adjust=False).mean()
+    return pd.DataFrame({"macd": line, "signal": sig, "hist": line - sig}, index=close.index)
+
+
+def stoch_rsi(
+    close: pd.Series, rsi_period: int = 14, stoch_period: int = 14, k: int = 3, d: int = 3
+) -> pd.DataFrame:
+    """Stochastic RSI (%K, %D) in 0-100 — a faster, leading momentum oscillator."""
+    r = rsi(close, rsi_period)
+    lo = r.rolling(stoch_period, min_periods=stoch_period).min()
+    hi = r.rolling(stoch_period, min_periods=stoch_period).max()
+    stoch = (r - lo) / (hi - lo).replace(0.0, np.nan)
+    k_line = (stoch * 100.0).rolling(k, min_periods=k).mean()
+    d_line = k_line.rolling(d, min_periods=d).mean()
+    return pd.DataFrame({"k": k_line, "d": d_line}, index=close.index)
+
+
 def bollinger(close: pd.Series, period: int = 20, num_std: float = 2.0) -> pd.DataFrame:
     """Bollinger bands and the %B / bandwidth derived features."""
     mid = sma(close, period)
