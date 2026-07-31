@@ -43,6 +43,7 @@ def render_strategy(signals: dict[str, pd.DataFrame]) -> str:
             rows.append({
                 "coin": r["symbol"],
                 "aşama": r["stage"],
+                "güven": _n(r.get("confidence"), "{:.0f}"),
                 "TF": r.get("tf", "-"),
                 "kesişim": f"{int(r['break_ago'])} bar önce" if r.get("break_ago") == r.get("break_ago") else "-",
                 "fiyat": _price(r["price"]),
@@ -75,10 +76,18 @@ td.sym,th.sym{text-align:left;font-weight:700;}tbody tr:nth-child(odd){backgroun
 .foot{color:#6b7280;font-size:11px;margin-top:18px;border-top:1px solid #232a3a;padding-top:9px;}
 """
 
-_HEAD = [("sym", "Coin"), ("stage", "Aşama"), ("side", "Yön"), ("tf", "TF"),
+_HEAD = [("sym", "Coin"), ("stage", "Aşama"), ("conf", "Güven"), ("side", "Yön"), ("tf", "TF"),
          ("brk", "Kesişim"), ("price", "Fiyat"),
          ("vol", "Hacim"), ("entry", "Giriş"), ("sl", "SL"), ("tp", "TP"),
          ("chg", "24s%"), ("fund", "Funding%"), ("ls", "L/S"), ("note", "Kural / Not")]
+
+
+def _conf_cell(r):
+    c = r.get("confidence")
+    if c is None or (isinstance(c, float) and c != c):
+        return '<td>-</td>'
+    cls = "up" if c >= 70 else ("" if c >= 55 else "dn")
+    return f'<td class="{cls}"><b>{c:.0f}</b></td>'
 
 
 def _brk(r):
@@ -94,6 +103,7 @@ def _row(r):
     return "<tr>" + "".join([
         f'<td class="sym">{html.escape(str(r["symbol"]))}</td>',
         f'<td>{badge}</td>',
+        _conf_cell(r),
         f'<td>{html.escape(str(r["side"]))}</td>',
         f'<td>{html.escape(str(r.get("tf", "-")))}</td>',
         f'<td>{_brk(r)}</td>',
@@ -125,11 +135,12 @@ def render_strategy_html(signals: dict[str, pd.DataFrame], *, meta: dict | None 
     return f"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>BB Orta Bant Kırılım Stratejisi</title>
 <style>{_CSS}</style></head><body>
-<h1>🎯 Bollinger Orta Bant Kırılımı (retest yok)</h1>
-<div class="sub">{ts} · taranan: {meta.get('scanned','?')} coin · 15m/1h orta bant kesişimi + 5m onay · GİRİŞ=5m onayladı gir, BEKLE=kesişti 5m onayı bekliyor</div>
+<h1>🎯 Sıkışmadan Kırılım + Çoklu Teyit</h1>
+<div class="sub">{ts} · taranan: {meta.get('scanned','?')} coin · dip/tepe dönüşü → yatay sıkışma → 15m/1h orta bant kırılımı + 5m onay · Güven≥70 güçlü</div>
 {body or '<div style="color:#9aa4b2">Uygun kurulum yok.</div>'}
-<div class="foot">Strateji: 15m orta bant (20-SMA) YUKARI kesişimi (son 0-2 mum) + 5m fiyat orta bandın ÜSTÜNDE → LONG (tam tersi SHORT). 15m'de yoksa 1h'e bakılır.
-Repaint önleme: veriler son tamamlanmış mumdan. SL: son 5m mumunun dibi/tepesi ± ATR. TP: karşı dış bant (long üst, short alt). Karar sana ait.</div>
+<div class="foot">Strateji: fiyat dip/tepeden dönüp <b>yataya geçer (Bollinger sıkışması)</b> → 15m orta bant (20-SMA) kesişimi (son 0-2 mum) + <b>1h aynı yönde</b> + 5m onay → sinyal.
+Güven skoru (0-100): sıkışma, 1h teyidi, RSI dönüşü, hacim patlaması, ADX/DI, MACD. Repaint önleme: veriler son tamamlanmış mumdan.
+SL: son 5m mumunun dibi/tepesi ± ATR. TP: karşı dış bant. Karar sana ait.</div>
 </body></html>"""
 
 

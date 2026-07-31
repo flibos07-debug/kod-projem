@@ -492,7 +492,12 @@ def cmd_futures_bbstrat(args: argparse.Namespace) -> int:
         else:
             logger.error("No symbols and no universe discovery")
             return 1
-        scanner = BBRetestScanner(client, params=BBStratParams())
+        params = BBStratParams(
+            require_squeeze=not args.no_squeeze,
+            require_htf=not args.no_htf,
+            min_confidence=args.min_confidence,
+        )
+        scanner = BBRetestScanner(client, params=params)
 
         def one_pass(iteration: int) -> None:
             fundamentals = _fetch_fundamentals(client, symbols)
@@ -735,7 +740,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_bb.add_argument("--top", type=int, default=None, help="scan only top-N by volume")
     p_bb.add_argument("--top-n", type=int, default=20, help="how many per section to show")
     p_bb.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions")
-    p_bb.add_argument("--watch", action="store_true", help="ayrıca BEKLE (kesişti, 5m onayı bekliyor) coinleri göster")
+    p_bb.add_argument("--watch", action="store_true", help="ayrıca BEKLE (kesişti, onay bekliyor) coinleri göster")
+    p_bb.add_argument("--min-confidence", type=float, default=60.0, help="GİRİŞ için minimum güven skoru (0-100); yükselt=daha az ama daha güçlü sinyal")
+    p_bb.add_argument("--no-squeeze", action="store_true", help="sıkışma (yatay) şartını kaldır")
+    p_bb.add_argument("--no-htf", action="store_true", help="1h teyidi şartını kaldır")
     p_bb.add_argument("--loop", action="store_true", help="canlı mod: her 5m mum kapanışında otomatik yenilenir")
     p_bb.add_argument("--html", action="store_true", help="write a colored HTML report")
     p_bb.add_argument("--open-html", action="store_true", help="open the HTML in the browser")
