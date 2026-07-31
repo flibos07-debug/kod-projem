@@ -472,7 +472,7 @@ def _giris_count(signals: dict) -> int:
 
 
 def cmd_futures_bbstrat(args: argparse.Namespace) -> int:
-    """Bollinger squeeze -> mid-band break -> retest strategy scan (+ live loop)."""
+    """Bollinger mid-band cross strategy scan (+ live loop synced to 5m closes)."""
     args.market = "futures"
     config = _load_config(args.config)
     import os
@@ -480,6 +480,7 @@ def cmd_futures_bbstrat(args: argparse.Namespace) -> int:
 
     from .reporting.strategy_report import render_strategy, save_strategy_html
     from .scanner.bb_retest import BBRetestScanner, BBStratParams
+    from .utils.timing import next_boundary, seconds_until
 
     with _make_client(args) as client:
         if args.symbols:
@@ -504,13 +505,13 @@ def cmd_futures_bbstrat(args: argparse.Namespace) -> int:
             if args.loop:
                 os.system("cls" if os.name == "nt" else "clear")
             now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"=== BB Sıkışma→Kırılım→Retest @ {now} "
+            print(f"=== BB Orta Bant Kırılımı @ {now} "
                   f"{'(canlı #%d)' % iteration if args.loop else ''} ===")
             print(f"(taranan: {len(symbols)} coin | min hacim: {args.min_volume}M$)\n")
             n_giris = _giris_count(signals)
             if n_giris:
                 print("\a")  # terminal bell
-                print(f"🔔🔔  {n_giris} COİN GİRİŞ AŞAMASINDA — retest oldu!  🔔🔔\n")
+                print(f"🔔🔔  {n_giris} COİN GİRİŞ AŞAMASINDA — 5m onayladı, gir!  🔔🔔\n")
             print(render_strategy(signals))
             if args.html:
                 html_path = Path(config.storage.report_directory) / "bbstrat_live.html"
@@ -525,8 +526,14 @@ def cmd_futures_bbstrat(args: argparse.Namespace) -> int:
                 one_pass(iteration)
                 if not args.loop:
                     break
-                print(f"\n⏳ {args.interval}s sonra otomatik yenilenecek… (durdurmak için Ctrl+C)")
-                _time.sleep(args.interval)
+                # Sync to 5m candle closes: wake just after the next boundary so
+                # every scan reads freshly-closed candles ("every bar close").
+                target = next_boundary(datetime.now(timezone.utc), "5m")
+                wait = seconds_until(target) + 2.0  # small buffer for exchange lag
+                mm = target.astimezone().strftime("%H:%M")
+                print(f"\n⏳ Sıradaki 5m kapanışına senkron: {mm} "
+                      f"(~{int(wait)}s) — durdurmak için Ctrl+C")
+                _time.sleep(wait)
                 iteration += 1
         except KeyboardInterrupt:
             print("\nDurduruldu.")
@@ -723,14 +730,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_scr.add_argument("--open-html", action="store_true", help="open the HTML in the browser")
     p_scr.set_defaults(func=cmd_futures_screener)
 
-    p_bb = sub.add_parser("futures-bbstrat", help="Bollinger squeeze->break->retest strategy (15m yön, 5m tetik)")
+    p_bb = sub.add_parser("futures-bbstrat", help="Bollinger orta bant kırılımı (15m/1h yön + 5m onay, retest yok)")
     p_bb.add_argument("--symbols", nargs="*", default=[], help="symbols (default: whole universe)")
     p_bb.add_argument("--top", type=int, default=None, help="scan only top-N by volume")
     p_bb.add_argument("--top-n", type=int, default=20, help="how many per section to show")
     p_bb.add_argument("--min-volume", type=float, default=0.0, help="min 24h quote volume in millions")
-    p_bb.add_argument("--watch", action="store_true", help="also list squeezing coins (İZLE)")
-    p_bb.add_argument("--loop", action="store_true", help="canlı mod: kendini otomatik yeniler")
-    p_bb.add_argument("--interval", type=int, default=120, help="canlı modda yenileme aralığı (saniye)")
+    p_bb.add_argument("--watch", action="store_true", help="ayrıca BEKLE (kesişti, 5m onayı bekliyor) coinleri göster")
+    p_bb.add_argument("--loop", action="store_true", help="canlı mod: her 5m mum kapanışında otomatik yenilenir")
     p_bb.add_argument("--html", action="store_true", help="write a colored HTML report")
     p_bb.add_argument("--open-html", action="store_true", help="open the HTML in the browser")
     p_bb.set_defaults(func=cmd_futures_bbstrat)

@@ -1,4 +1,4 @@
-"""Terminal + colored-HTML rendering for the BB squeeze→break→retest strategy."""
+"""Terminal + colored-HTML rendering for the BB mid-band cross strategy."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pandas as pd
 
 from .report import render_table
 
-_STAGE_CLASS = {"GİRİŞ": "st-early", "BEKLE": "st-mid", "İZLE": "st-late"}
+_STAGE_CLASS = {"GİRİŞ": "st-early", "BEKLE": "st-mid"}
 
 
 def _n(x, fmt="{:.2f}"):
@@ -29,7 +29,7 @@ def _price(x):
     return f"{x:.6f}"
 
 
-_SECTIONS = [("long", "LONG (AL)"), ("short", "SHORT (SAT)"), ("watch", "İZLE (sıkışma)")]
+_SECTIONS = [("long", "LONG (AL)"), ("short", "SHORT (SAT)")]
 
 
 def render_strategy(signals: dict[str, pd.DataFrame]) -> str:
@@ -43,8 +43,9 @@ def render_strategy(signals: dict[str, pd.DataFrame]) -> str:
             rows.append({
                 "coin": r["symbol"],
                 "aşama": r["stage"],
+                "TF": r.get("tf", "-"),
+                "kesişim": f"{int(r['break_ago'])} bar önce" if r.get("break_ago") == r.get("break_ago") else "-",
                 "fiyat": _price(r["price"]),
-                "5m %B": _n(r.get("pctb5")),
                 "hacim": _n(r.get("vol_ratio"), "{:.1f}x"),
                 "giriş": _price(r["entry"]),
                 "SL": f"{_price(r['stop_loss'])} ({_n(r.get('sl_pct'), '{:+.1f}')}%)",
@@ -74,9 +75,17 @@ td.sym,th.sym{text-align:left;font-weight:700;}tbody tr:nth-child(odd){backgroun
 .foot{color:#6b7280;font-size:11px;margin-top:18px;border-top:1px solid #232a3a;padding-top:9px;}
 """
 
-_HEAD = [("sym", "Coin"), ("stage", "Aşama"), ("side", "Yön"), ("price", "Fiyat"),
-         ("pctb", "5m %B"), ("vol", "Hacim"), ("entry", "Giriş"), ("sl", "SL"), ("tp", "TP"),
+_HEAD = [("sym", "Coin"), ("stage", "Aşama"), ("side", "Yön"), ("tf", "TF"),
+         ("brk", "Kesişim"), ("price", "Fiyat"),
+         ("vol", "Hacim"), ("entry", "Giriş"), ("sl", "SL"), ("tp", "TP"),
          ("chg", "24s%"), ("fund", "Funding%"), ("ls", "L/S"), ("note", "Kural / Not")]
+
+
+def _brk(r):
+    v = r.get("break_ago")
+    if v is None or (isinstance(v, float) and v != v):
+        return "-"
+    return f"{int(v)} bar önce"
 
 
 def _row(r):
@@ -86,8 +95,9 @@ def _row(r):
         f'<td class="sym">{html.escape(str(r["symbol"]))}</td>',
         f'<td>{badge}</td>',
         f'<td>{html.escape(str(r["side"]))}</td>',
+        f'<td>{html.escape(str(r.get("tf", "-")))}</td>',
+        f'<td>{_brk(r)}</td>',
         f'<td>{_price(r["price"])}</td>',
-        f'<td>{_n(r.get("pctb5"))}</td>',
         f'<td>{_n(r.get("vol_ratio"), "{:.1f}x")}</td>',
         f'<td>{_price(r["entry"])}</td>',
         f'<td>{_price(r["stop_loss"])} <span class="dn">({_n(r.get("sl_pct"), "{:+.1f}")}%)</span></td>',
@@ -113,13 +123,13 @@ def render_strategy_html(signals: dict[str, pd.DataFrame], *, meta: dict | None 
     ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     body = "".join(_table(signals.get(k), k, t) for k, t in _SECTIONS)
     return f"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>BB Retest Stratejisi</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>BB Orta Bant Kırılım Stratejisi</title>
 <style>{_CSS}</style></head><body>
-<h1>🎯 Bollinger Sıkışma → Kırılım → Retest</h1>
-<div class="sub">{ts} · taranan: {meta.get('scanned','?')} coin · 15m yön + 5m tetik · GİRİŞ=retest oldu, BEKLE=kırıldı retest bekliyor, İZLE=sıkışıyor</div>
+<h1>🎯 Bollinger Orta Bant Kırılımı (retest yok)</h1>
+<div class="sub">{ts} · taranan: {meta.get('scanned','?')} coin · 15m/1h orta bant kesişimi + 5m onay · GİRİŞ=5m onayladı gir, BEKLE=kesişti 5m onayı bekliyor</div>
 {body or '<div style="color:#9aa4b2">Uygun kurulum yok.</div>'}
-<div class="foot">Strateji: 15m sıkışma+yatay → 20-SMA (orta bant) kırılımı ve kapanış → 5m karşı banda retest → giriş.
-SL: giriş 5m mumunun dibi/tepesi. TP: 15m karşı dış bant (long üst, short alt). Karar sana ait.</div>
+<div class="foot">Strateji: 15m orta bant (20-SMA) YUKARI kesişimi (son 0-2 mum) + 5m fiyat orta bandın ÜSTÜNDE → LONG (tam tersi SHORT). 15m'de yoksa 1h'e bakılır.
+Repaint önleme: veriler son tamamlanmış mumdan. SL: son 5m mumunun dibi/tepesi ± ATR. TP: karşı dış bant (long üst, short alt). Karar sana ait.</div>
 </body></html>"""
 
 
